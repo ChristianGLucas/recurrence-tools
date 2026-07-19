@@ -646,3 +646,87 @@ def test_feasibility_check_never_raises_on_unvalidated_values(rule):
     assert result.error.code == "INVALID_RULE"
     assert "Traceback" not in result.error.message
     assert "ValueError" not in result.error.message
+
+
+def test_serving_a_small_limit_never_pays_for_an_occurrence_not_asked_for():
+    """A cheap answer must not be lost to an expensive one nobody requested.
+
+    This rule's first occurrence is instant and its second is 28 years later.
+    Fetching one past the limit to decide `truncated` spent the entire budget on
+    the second and returned LIMIT_EXCEEDED with nothing -- discarding an answer
+    that was already in hand.
+    """
+    rule = (
+        "FREQ=SECONDLY;BYMONTH=2;BYMONTHDAY=29;BYHOUR=9;BYMINUTE=0;"
+        "BYSECOND=0;BYDAY=SU"
+    )
+    result, elapsed = timed(
+        lambda: expand(
+            FakeContext(),
+            ExpandRequest(
+                recurrence=recurrence(rule, "20040228T000000"), limit=1
+            ),
+        )
+    )
+    assert result.error.code == "", result.error.message
+    assert list(result.occurrences) == ["20040229T090000"]
+    assert elapsed < 1.0, f"paid for an unrequested occurrence: {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=SECONDLY;BYYEARDAY=366;BYMONTH=1",
+        "FREQ=SECONDLY;BYYEARDAY=1;BYMONTH=12",
+        "FREQ=SECONDLY;BYYEARDAY=200;BYMONTH=1",
+        "FREQ=MINUTELY;BYYEARDAY=1;BYMONTH=6",
+    ],
+)
+def test_impossible_yearday_month_pairs_are_refused_immediately(rule):
+    """Day 366 only lands in December, day 1 only in January.
+
+    Without this the expander discovers it by stepping second by second toward
+    its year ceiling -- the cheapest denial-of-service the package had, at ~3
+    CPU-seconds per 109-byte request.
+    """
+    result, elapsed = timed(
+        lambda: count(
+            FakeContext(),
+            CountRequest(recurrence=recurrence(rule, "20260101T000000"), limit=10),
+        )
+    )
+    assert result.error.code == "INVALID_RULE", result
+    assert "can never fall in" in result.error.message
+    assert elapsed < 1.0, f"took {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=YEARLY;BYYEARDAY=366;BYMONTH=12",  # 366 IS in December
+        "FREQ=YEARLY;BYYEARDAY=1;BYMONTH=1",
+        "FREQ=YEARLY;BYYEARDAY=-1;BYMONTH=12",   # last day of the year
+        "FREQ=YEARLY;BYYEARDAY=60;BYMONTH=2,3",  # 60 straddles Feb/Mar
+    ],
+)
+def test_possible_yearday_month_pairs_are_not_refused(rule):
+    """The check must not over-reach: day 60 is Feb 29 in a leap year and
+    Mar 1 otherwise, so both months are legitimate."""
+    assert validate(FakeContext(), RuleInput(rrule=rule)).valid is True
+
+
+def test_a_package_fault_is_never_reported_as_the_callers_rule(monkeypatch):
+    """INTERNAL exists so a caller is never sent to debug valid input."""
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated internal fault")
+
+    # Patch the name the node actually calls: it imported check_rule directly,
+    # so the binding in _recur is not the one it uses.
+    import nodes.validate as validate_node
+
+    monkeypatch.setattr(validate_node, "check_rule", boom)
+    result = validate(FakeContext(), RuleInput(rrule="FREQ=DAILY;COUNT=3"))
+    assert result.valid is False
+    assert result.error.code == "INTERNAL"
+    assert "Traceback" not in result.error.message
+    assert "RuntimeError" not in result.error.message

@@ -133,9 +133,11 @@ hang:
 | `rdate` / `exdate` entries | 1000 each | `LIMIT_EXCEEDED` |
 | `COUNT` inside a rule | 10000 | `LIMIT_EXCEEDED` |
 | Occurrences visited | 200000 | `truncated` (or `LIMIT_EXCEEDED`, below) |
+| Error codes | `INVALID_RULE`, `INVALID_DATETIME`, `INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, `INTERNAL` | — |
 | **Candidate instants examined** | **20,000,000** | `truncated` (or `LIMIT_EXCEEDED`, below) |
 | Impossible `BYMONTH`/`BYMONTHDAY` pair | refused up front | `INVALID_RULE` |
-| Wall-clock backstop | 3 seconds | `LIMIT_EXCEEDED` |
+| Impossible `BYYEARDAY`/`BYMONTH` pair | refused up front | `INVALID_RULE` |
+| Wall-clock backstop | 3s deadline, ~3.5s worst case for the caller | `LIMIT_EXCEEDED` |
 | `limit` argument | 10000 accepted (default 100; `Count` defaults to 10000) | `INVALID_ARGUMENT` |
 
 **Cost is not result size.** `FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` is
@@ -161,21 +163,28 @@ microseconds instead, with an error naming the real problem.
 
 **The wall-clock backstop is deliberately not the primary bound.** A clock is
 not deterministic; if it decided requests, identical input could return
-different answers under different load. It covers only the residue: a rule that
-yields nothing, is not caught by the feasibility check above, and would
-otherwise scan inside a single library call where no deadline can be checked.
-Each expansion runs in a child process killed at 3 seconds. Every case
-measured — including the pathological ones — now completes in well under 0.5s,
-so the backstop has roughly sixfold headroom and is not expected to fire on any
-real input. If a platform cannot provide an isolated worker, the request is
-refused rather than run unbounded.
+different answers under different load. Each expansion runs in a child process
+whose result is awaited for 3 seconds; a worker that overruns is killed, which
+adds up to 0.5s more, so **the caller's worst case is about 3.5 seconds** — that
+is the number to size a client timeout against, not the internal 3s deadline.
 
-**Determinism, precisely.** For every rule that yields occurrences, the result is
-determined by the input alone: the budgets are counts, so the same request gives
-the same answer on any machine. The one exception is the backstop above — a rule
-pathological enough to reach it could, on a sufficiently slow host, return
-`LIMIT_EXCEEDED` where a faster host returned an answer. No such input is
-currently known.
+Measured on this machine: the scan-budget-saturating example above takes ~1.2s,
+a rule with a decades-wide gap between occurrences ~2.0s, a dense expansion at
+the maximum limit ~0.03s. So the backstop has under 2× headroom over the slowest
+legitimate request, not a comfortable margin.
+
+**Determinism, precisely.** The scan budget is a count, so for rules whose
+occurrences arrive within it the answer is determined by the input alone and is
+identical on every machine. That is *not* a guarantee for every rule. The budget
+is charged from the gap between occurrences, which means it is charged **after**
+the expander has already found the next one — so a rule with a very large gap
+pays the cost before any count can object, and the outcome is then decided by
+the wall clock. A rule whose occurrences are decades apart can therefore return
+an answer on a fast host and `LIMIT_EXCEEDED` on a slow one. Such inputs are
+constructible; they are pathological, but they are not hypothetical.
+
+If a platform cannot provide an isolated worker, the request is refused rather
+than run unbounded.
 
 **The caller's rule is never rewritten.** An earlier version bounded cost by
 injecting a synthesized `UNTIL`, which silently changed the answer for sparse
@@ -198,7 +207,9 @@ for what was actually a `BYSETPOS` mistake, while the flow reports success.
 
 No node raises for bad input. Each output message carries an `error` field,
 unset on success, with a stable code: `INVALID_RULE`, `INVALID_DATETIME`,
-`INVALID_ARGUMENT`, or `LIMIT_EXCEEDED`.
+`INVALID_ARGUMENT`, `LIMIT_EXCEEDED`, or `INTERNAL`. `INTERNAL` means the fault
+was the package's, not the caller's rule — it is reported separately precisely
+so a caller is never sent to debug input that was fine.
 
 ## Correctness
 

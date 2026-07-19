@@ -235,6 +235,7 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
     # Only once every part has been range- and type-checked: this reasons over
     # the values, so running it first would hand it input nobody had validated.
     _check_month_day_feasible(parts)
+    _check_yearday_month_feasible(parts)
     return parts
 
 
@@ -242,6 +243,7 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
 # never occur, and asking the expander to discover that costs seconds of
 # scanning to the year ceiling -- so it is refused up front, deterministically.
 DAYS_IN_MONTH = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+DAYS_IN_COMMON = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
 
 
 def _check_month_day_feasible(parts: List[Tuple[str, str]]) -> None:
@@ -263,6 +265,49 @@ def _check_month_day_feasible(parts: List[Tuple[str, str]]) -> None:
             f"BYMONTHDAY={by['BYMONTHDAY']} can never occur in "
             f"BYMONTH={by['BYMONTH']}; the longest of those months has "
             f"{longest} days",
+        )
+
+
+def _months_for_yearday(day: int) -> set:
+    """Which months an ordinal day-of-year can fall in, over leap and common years."""
+    months = set()
+    for year_length, table in ((365, DAYS_IN_COMMON), (366, DAYS_IN_MONTH)):
+        ordinal = day if day > 0 else year_length + 1 + day
+        if not 1 <= ordinal <= year_length:
+            continue
+        running = 0
+        for index, length in enumerate(table, start=1):
+            running += length
+            if ordinal <= running:
+                months.add(index)
+                break
+    return months
+
+
+def _check_yearday_month_feasible(parts: List[Tuple[str, str]]) -> None:
+    """Refuse a BYYEARDAY/BYMONTH pair that no calendar can satisfy.
+
+    Day 366 only ever lands in December, day 1 only in January. Without this the
+    expander discovers it the slow way -- stepping second by second toward its
+    year ceiling -- which is the cheapest denial-of-service the package had.
+    """
+    by = {k: v for k, v in parts}
+    if "BYYEARDAY" not in by or "BYMONTH" not in by:
+        return
+    try:
+        yeardays = [int(v) for v in by["BYYEARDAY"].split(",")]
+        months = {int(v) for v in by["BYMONTH"].split(",")}
+    except ValueError:  # pragma: no cover - _check_part rejects these first
+        return
+    reachable = set()
+    for day in yeardays:
+        reachable |= _months_for_yearday(day)
+    if reachable and months and not (reachable & months):
+        raise _err(
+            "INVALID_RULE",
+            f"BYYEARDAY={by['BYYEARDAY']} can never fall in "
+            f"BYMONTH={by['BYMONTH']}; those days occur in "
+            f"month(s) {','.join(str(m) for m in sorted(reachable))}",
         )
 
 
@@ -417,12 +462,15 @@ def _canonical_value(key: str, value: str) -> str:
         # Strip a redundant leading '+' so "+1MO" and "1MO" -- the same rule --
         # normalize identically. INT_LIST_PARTS already does this via int();
         # leaving BYDAY out made `normalized` unusable as an equality key.
-        seen = []
-        for item in value.split(","):
-            entry = (item[1:] if item.startswith("+") else item).upper()
-            if entry not in seen:
-                seen.append(entry)
-        return ",".join(seen)
+        # Sorted like every other list part -- BY* order does not affect the
+        # recurrence set, so two spellings of one rule must converge on one text.
+        entries = {
+            (item[1:] if item.startswith("+") else item).upper()
+            for item in value.split(",")
+        }
+        return ",".join(
+            sorted(entries, key=lambda e: (WEEKDAYS.index(e[-2:]), int(e[:-2] or 0)))
+        )
     if key in INT_LIST_PARTS:
         # De-duplicated and ordered: two spellings of the same rule must produce
         # the same canonical text, or `normalized` cannot serve as a key.
@@ -755,6 +803,11 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
 # request that is making progress.
 SCAN_TIMEOUT_SECONDS = 3.0
 
+# How long reaping a killed worker may add on top. Kept small deliberately: the
+# caller's worst case is SCAN_TIMEOUT_SECONDS + this, and that total is the
+# number worth documenting, not the internal deadline alone.
+REAP_TIMEOUT_SECONDS = 0.5
+
 
 def _isolated_entry(module_name: str, data: bytes, queue) -> None:
     import importlib
@@ -764,7 +817,9 @@ def _isolated_entry(module_name: str, data: bytes, queue) -> None:
     except RecurError as exc:
         queue.put(("err", exc.code, exc.message))
     except Exception as exc:  # pragma: no cover - defence in depth
-        queue.put(("err", "INVALID_RULE", f"{type(exc).__name__}: {exc}"))
+        # INTERNAL, not INVALID_RULE: the caller's rule may be perfectly fine,
+        # and telling them otherwise sends them to debug the wrong thing.
+        queue.put(("err", "INTERNAL", f"{type(exc).__name__}: {exc}"))
 
 
 def isolate(module_name: str, input_msg):
@@ -843,11 +898,12 @@ def _reap(proc, channel) -> None:
     under sustained load unless both are released explicitly.
     """
     if proc.is_alive():
-        proc.terminate()
-        proc.join(1.0)
-        if proc.is_alive():  # pragma: no cover - terminate is reliable here
-            proc.kill()
-    proc.join(1.0)
+        # SIGKILL immediately rather than SIGTERM-then-wait. The child is a
+        # daemon holding no resource that needs an orderly shutdown, and a
+        # graceful path added seconds AFTER the deadline -- so the bound the
+        # caller experienced was not the bound that was advertised.
+        proc.kill()
+    proc.join(REAP_TIMEOUT_SECONDS)
     try:
         channel.close()
         channel.join_thread()
@@ -881,7 +937,12 @@ def take(exp: Expansion, limit: int) -> Tuple[List[str], bool]:
     """
     out: List[str] = []
     for dt in walk(exp):
-        if len(out) == limit:
-            return out, True
         out.append(exp.format(dt))
+        if len(out) == limit:
+            # Stop HERE rather than looping once more to discover whether another
+            # occurrence exists. That extra pull is unbounded: for a rule whose
+            # next gap is decades wide it can consume the entire budget and lose
+            # the answer the caller actually asked for. `truncated` therefore
+            # means "collection stopped early, more may exist", not "more exist".
+            return out, True
     return out, exp.budget_exhausted

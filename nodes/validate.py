@@ -22,4 +22,12 @@ def validate(ax: AxiomContext, input: RuleInput) -> ValidationResult:
         return ValidationResult(
             valid=False, error={"code": exc.code, "message": exc.message}
         )
+    except Exception:
+        # This node runs in the parent process with no isolation, so nothing
+        # else would stop an internal fault reaching the caller as a raw
+        # traceback carrying host paths. Reported as ours, not as their rule's.
+        return ValidationResult(
+            valid=False,
+            error={"code": "INTERNAL", "message": "the rule could not be processed"},
+        )
     return ValidationResult(valid=True, normalized=canonical_rule(parts))

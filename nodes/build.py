@@ -73,4 +73,11 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
         probe_rule(rule)
     except RecurError as exc:
         return RuleOutput(error={"code": exc.code, "message": exc.message})
+    except Exception:
+        # This node runs in the parent process with no isolation, so nothing
+        # else would stop an internal fault reaching the caller as a raw
+        # traceback carrying host paths. Reported as ours, not as their rule's.
+        return RuleOutput(
+            error={"code": "INTERNAL", "message": "the rule could not be assembled"}
+        )
     return RuleOutput(rrule=rule)

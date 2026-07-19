@@ -37,8 +37,22 @@ def test_default_limit_is_100():
     assert r.count == 100 and r.truncated is True
 
 
-def test_truncated_is_false_when_rule_ends_exactly_at_limit():
+def test_truncated_is_conservative_when_the_limit_is_reached_exactly():
+    """`truncated` means "collection stopped early, more may exist".
+
+    Deciding it precisely would mean pulling one occurrence beyond the limit,
+    and that pull is unbounded: for a rule whose next gap is decades wide it can
+    consume the whole budget and lose the answer the caller asked for. Over-
+    reporting truncation is the safe direction -- the caller can ask for more
+    and get nothing, which costs them nothing.
+    """
     r = run("FREQ=DAILY;COUNT=3", "20260101T000000", limit=3)
+    assert r.count == 3
+    assert list(r.occurrences)[-1] == "20260103T000000"
+    assert r.truncated is True
+
+    # Below the limit it is exact, because collection ran to genuine exhaustion.
+    r = run("FREQ=DAILY;COUNT=3", "20260101T000000", limit=10)
     assert r.count == 3 and r.truncated is False
 
 

@@ -22,7 +22,9 @@ option java_outer_classname = "Messages";
 // unset on success. Nodes never raise for bad input — they return this instead.
 message Error {
   // Stable machine-readable code: INVALID_RULE, INVALID_DATETIME,
-  // INVALID_ARGUMENT, or LIMIT_EXCEEDED.
+  // INVALID_ARGUMENT, LIMIT_EXCEEDED, or INTERNAL. INTERNAL means the package
+  // itself faulted; the caller's input may be perfectly valid, and reporting it
+  // as a rule error would send them to debug the wrong thing.
   string code = 1;
   // Human-readable detail naming exactly what was rejected and why.
   string message = 2;
@@ -199,9 +201,14 @@ message OccurrenceList {
   repeated string occurrences = 1;
   // The number of entries in `occurrences`.
   int32 count = 2;
-  // True when `occurrences` was cut short rather than exhausted: either the
-  // effective limit was reached, or the scan budget was. Both mean more
-  // occurrences exist; the ones returned are correct either way.
+  // True when collection stopped early rather than running to exhaustion:
+  // either the effective limit was reached, or the scan budget was.
+  //
+  // It means "more MAY exist", not "more exist". Deciding it exactly would
+  // require fetching one occurrence beyond the limit, and that fetch is
+  // unbounded -- for a rule whose next gap is decades wide it can consume the
+  // whole budget and lose the occurrences already collected. Over-reporting is
+  // the safe direction. Below the limit it is exact.
   //
   // A recurrence running past the end of the representable calendar (year 9999)
   // simply stops there, with `truncated` false -- there is nothing beyond it.

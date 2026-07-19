@@ -48,15 +48,22 @@ def test_end_equal_to_start_is_rejected():
     assert r.error.code == "INVALID_ARGUMENT"
 
 
-def test_far_future_window_is_bounded_and_says_so():
+def test_a_window_the_scan_never_reached_is_an_error_not_an_empty_answer():
     # Reaching this window means stepping over ~1.9 billion occurrences, so the
-    # scan budget stops first. The answer is an empty list flagged `truncated`,
-    # not an error: nothing was found, and the caller is told the search did not
-    # finish rather than being left to read absence as certainty.
+    # budget stops first -- before the window is ever entered. Returning an empty
+    # list would read as "this window has no occurrences", a finding that was
+    # never established. The distinction matters: an empty answer is a claim.
     result = run("FREQ=SECONDLY", "20260101T000000", "20860101T000000", "20860101T000100")
+    assert result.error.code == "LIMIT_EXCEEDED"
+    assert "before reaching the requested window" in result.error.message
+
+
+def test_an_empty_window_the_scan_did_reach_is_a_real_answer():
+    # Here the scan passes straight through the window, so "no occurrences" is
+    # an established finding and is returned as one.
+    result = run("FREQ=YEARLY", "20260101T000000", "20260601T000000", "20260901T000000")
     assert result.error.code == ""
     assert result.count == 0
-    assert result.truncated is True, "an unfinished search must not look exhaustive"
 
 
 def test_mixing_utc_window_with_floating_anchor_is_rejected():

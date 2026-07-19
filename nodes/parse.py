@@ -21,6 +21,13 @@ def parse(ax: AxiomContext, input: RuleInput) -> RuleParts:
         probe_rule(input.rrule)
     except RecurError as exc:
         return RuleParts(error={"code": exc.code, "message": exc.message})
+    except Exception:
+        # This node runs in the parent process with no isolation, so nothing
+        # else would stop an internal fault reaching the caller as a raw
+        # traceback carrying host paths. Reported as ours, not as their rule's.
+        return RuleParts(
+            error={"code": "INTERNAL", "message": "the rule could not be processed"}
+        )
 
     out = RuleParts()
     for key, value in parts:
