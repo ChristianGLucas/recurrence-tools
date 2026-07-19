@@ -129,7 +129,6 @@ hang:
 | `rdate` / `exdate` entries | 1000 each | `LIMIT_EXCEEDED` |
 | `COUNT` inside a rule | 10000 | `LIMIT_EXCEEDED` |
 | Occurrences visited per request | 200000 | `LIMIT_EXCEEDED` |
-| Scan horizon (see below) | ~82 years of a `DAILY` rule | `LIMIT_EXCEEDED` |
 | Wall-clock per expansion | 5 seconds | `LIMIT_EXCEEDED` |
 | `limit` argument | 10000 (default 100; `Count` defaults to 10000) | `INVALID_ARGUMENT` |
 
@@ -137,25 +136,28 @@ The `limit` row is argument validation, not a budget — an out-of-range `limit`
 is a malformed request, so it returns `INVALID_ARGUMENT` while every genuine
 budget above returns `LIMIT_EXCEEDED`.
 
-Three separate things are bounded, because one bound does not imply the others:
+Two things are bounded, because one does not imply the other:
 
 1. **Occurrences visited**, not returned. A window query far in the future
    would otherwise step over billions of occurrences it never returns.
-2. **The scan horizon.** A rule can be valid and match *nothing* —
-   `FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30`, since February has no 30th. It yields
-   no occurrences at all, so a budget counted over yielded results never
-   advances while the expander grinds toward year 9999. Rules are therefore
-   rewritten with a horizon the expander must stop at, sized by how expensive
-   each step is. Reach is ~82 years for `DAILY`, ~575 for `WEEKLY`, millennia
-   for `MONTHLY`/`YEARLY`, and less for sub-daily rules where steps are many.
-3. **Wall-clock, enforced out of process.** The expander does not always honour
-   the horizon — with some part combinations it scans on regardless, inside a
-   single library call where no deadline could be checked. Expansion therefore
-   runs in a child process with a hard 5-second limit; on overrun the process is
-   killed and the caller gets `LIMIT_EXCEEDED`, with nothing left running.
+2. **Wall-clock, enforced out of process.** A rule can be valid and match
+   *nothing* — `FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30`, since February has no
+   30th. It yields no occurrences at all, so a budget counted over yielded
+   results never advances while the expander grinds toward year 9999. That hang
+   happens inside a single library call, where no deadline could be checked, so
+   each expansion runs in a child process with a hard 5-second limit; on
+   overrun the process is killed and the caller gets `LIMIT_EXCEEDED`.
+
+**The rule itself is never rewritten.** An earlier version bounded cost by
+injecting a synthesized `UNTIL`, which changed the answer for sparse rules:
+`FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` is one occurrence per day, but a
+ceiling sized from `SECONDLY` steps landed before its first occurrence and
+reported a bound. Cost is bounded by the worker, never by altering what the
+caller asked for.
 
 Hitting a bound is always a reported error, never a hang and never a silently
-short answer.
+short answer — and a rule that genuinely has no occurrences returns zero, which
+is an answer rather than a bound.
 
 ## Errors
 

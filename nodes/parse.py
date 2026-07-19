@@ -9,8 +9,10 @@ def parse(ax: AxiomContext, input: RuleInput) -> RuleParts:
 
     Absent parts come back empty or zero rather than filled with RFC defaults,
     so a caller can tell "INTERVAL was omitted" from "INTERVAL=1 was stated".
-    The rule is validated first, so a rule this node parses is one this package
-    will also expand.
+    The rule is validated first, with exactly the checks Validate applies, so a
+    rule this node parses is one Validate also accepts. Whether expanding it
+    completes within the expansion budget depends on the anchor and the request,
+    which a rule alone does not determine.
     """
     try:
         parts = check_rule(input.rrule)

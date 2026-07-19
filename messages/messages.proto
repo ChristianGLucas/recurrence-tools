@@ -51,6 +51,12 @@ message Recurrence {
   // to. Occurrences then keep wall-clock time across DST transitions, which is
   // what calendars mean by "every week at 09:00". Rejected when `dtstart` is
   // already UTC (trailing "Z"), since that would be two conflicting zones.
+  //
+  // DST edges resolve the way the underlying time library resolves them, and
+  // the wall-clock reading is preserved either way: a local time that does not
+  // exist on a spring-forward day is emitted as written (and lands on the
+  // instant after the gap), and a local time that occurs twice on a fall-back
+  // day resolves to the FIRST of the two.
   string tzid = 3;
   // RFC 5545 RDATE values: extra occurrences merged into the recurrence set.
   // Each must use a form compatible with `dtstart`. Max 1000 entries.
@@ -155,9 +161,10 @@ message RuleParts {
   repeated int32 bysetpos = 13;
   // WKST: the two-letter week-start day; empty when the rule omits it.
   string wkst = 14;
-  // Set by Parse when the rule could not be parsed. Ignored on input: Build
-  // reads only the parts above, so Parse's output can be piped straight into
-  // Build without stripping this field.
+  // Set by Parse when the rule could not be parsed. Parse's output pipes
+  // straight into Build with no adapter; on that path Build PROPAGATES this
+  // error verbatim and emits no rule, rather than re-deriving a diagnosis from
+  // the empty parts that accompany it.
   Error error = 15;
 }
 
