@@ -1,0 +1,68 @@
+name: christiangeorgelucas/recurrence-tools
+version: 0.1.0
+language: python
+description: >-
+  Composable RFC 5545 recurrence nodes over a single Recurrence envelope —
+  expand a rule into occurrences, query a window, step to the next occurrence,
+  test membership, count, and validate, parse, or build the rule itself.
+  Timezone-aware with correct wall-clock behaviour across DST, offline and
+  deterministic, wrapping python-dateutil.
+license: MIT
+author: Christian George Lucas
+tags:
+  - calendar
+  - recurrence
+  - rrule
+  - icalendar
+  - rfc5545
+  - scheduling
+  - datetime
+nodes:
+    - name: Expand
+      description: >-
+        Expand a recurrence into its first occurrences, earliest first, bounded
+        by a limit so an unbounded rule returns a page instead of running forever.
+      input: ExpandRequest
+      output: OccurrenceList
+    - name: Between
+      description: >-
+        List the occurrences of a recurrence inside a half-open [start, end)
+        time window.
+      input: BetweenRequest
+      output: OccurrenceList
+    - name: NextOccurrence
+      description: >-
+        Find the first occurrence of a recurrence strictly after a given
+        instant, or report that none remains.
+      input: NextRequest
+      output: Occurrence
+    - name: Validate
+      description: >-
+        Check whether a string is a valid RFC 5545 recurrence rule, reporting
+        which part is wrong and returning the rule in canonical form.
+      input: RuleInput
+      output: ValidationResult
+    - name: Parse
+      description: >-
+        Decompose an RFC 5545 recurrence rule into its individual parts, leaving
+        omitted parts empty rather than filling in RFC defaults.
+      input: RuleInput
+      output: RuleParts
+    - name: Build
+      description: >-
+        Assemble a validated RFC 5545 recurrence rule from its individual parts,
+        emitted in canonical part order.
+      input: RuleParts
+      output: RuleOutput
+    - name: Contains
+      description: >-
+        Test whether a specific instant is an occurrence of a recurrence,
+        honouring RDATE additions and EXDATE exclusions.
+      input: ContainsRequest
+      output: Membership
+    - name: Count
+      description: >-
+        Count how many occurrences a recurrence produces, up to a limit,
+        reporting whether the true total is larger.
+      input: CountRequest
+      output: OccurrenceCount

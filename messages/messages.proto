@@ -1,0 +1,205 @@
+// Data contracts for christiangeorgelucas/recurrence-tools.
+//
+// The vocabulary is RFC 5545 (iCalendar). Instants are exchanged as RFC 5545
+// form strings, never as epoch numbers, so a value round-trips through this
+// package the way a calendar file spells it:
+//
+//   DATE           "19970902"
+//   DATE-TIME      "19970902T090000"   (floating, or local to `tzid`)
+//   DATE-TIME UTC  "19970902T090000Z"
+//
+// Every occurrence this package emits uses the same form as the `dtstart` that
+// anchored it.
+
+syntax = "proto3";
+
+package christiangeorgelucas.recurrence_tools;
+
+option java_package = "gen";
+option java_outer_classname = "Messages";
+
+// A structured, deterministic failure. Every output message carries one; it is
+// unset on success. Nodes never raise for bad input — they return this instead.
+message Error {
+  // Stable machine-readable code: INVALID_RULE, INVALID_DATETIME,
+  // INVALID_ARGUMENT, or LIMIT_EXCEEDED.
+  string code = 1;
+  // Human-readable detail naming exactly what was rejected and why.
+  string message = 2;
+}
+
+// The canonical recurrence envelope every node in this package consumes: an
+// RFC 5545 recurrence rule anchored at a start instant, optionally extended with
+// explicit extra dates (RDATE) and exception dates (EXDATE).
+message Recurrence {
+  // A bare RFC 5545 RECUR value — the RRULE property VALUE only, with no
+  // "RRULE:" prefix and no other content, e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10".
+  // A RECUR value never contains ':' or a line break, so any input that does is
+  // rejected: that is how a smuggled "DTSTART:"/"EXDATE:" line is prevented from
+  // silently overriding this envelope's own anchor. Max 2048 characters.
+  string rrule = 1;
+  // RFC 5545 DTSTART, the anchor the rule expands from. Required. Its form
+  // (DATE, floating DATE-TIME, or UTC DATE-TIME) determines the form of every
+  // occurrence emitted.
+  string dtstart = 2;
+  // Optional IANA time-zone id (e.g. "America/New_York") that `dtstart` is local
+  // to. Occurrences then keep wall-clock time across DST transitions, which is
+  // what calendars mean by "every week at 09:00". Rejected when `dtstart` is
+  // already UTC (trailing "Z"), since that would be two conflicting zones.
+  string tzid = 3;
+  // RFC 5545 RDATE values: extra occurrences merged into the recurrence set.
+  // Each must use a form compatible with `dtstart`. Max 1000 entries.
+  repeated string rdate = 4;
+  // RFC 5545 EXDATE values: occurrences removed from the recurrence set. An
+  // EXDATE that matches no occurrence is ignored, per RFC 5545. Max 1000 entries.
+  repeated string exdate = 5;
+}
+
+// Ask for the first `limit` occurrences of a recurrence.
+message ExpandRequest {
+  // The recurrence to expand.
+  Recurrence recurrence = 1;
+  // How many occurrences to return. 0 means the default of 100; the maximum
+  // is 10000.
+  int32 limit = 2;
+}
+
+// Ask for the occurrences of a recurrence that fall inside a half-open window.
+message BetweenRequest {
+  // The recurrence to expand.
+  Recurrence recurrence = 1;
+  // Window start, INCLUSIVE. An RFC 5545 instant compatible with `dtstart`.
+  string start = 2;
+  // Window end, EXCLUSIVE. An RFC 5545 instant compatible with `dtstart`.
+  // Must be strictly after `start`.
+  string end = 3;
+  // Cap on returned occurrences. 0 means the default of 100; maximum 10000.
+  int32 limit = 4;
+}
+
+// Ask for the single next occurrence strictly after a given instant.
+message NextRequest {
+  // The recurrence to expand.
+  Recurrence recurrence = 1;
+  // Return the first occurrence strictly greater than this instant. When empty,
+  // the recurrence's own first occurrence is returned.
+  string after = 2;
+}
+
+// Ask whether a specific instant is an occurrence of a recurrence.
+message ContainsRequest {
+  // The recurrence to test against.
+  Recurrence recurrence = 1;
+  // The RFC 5545 instant to test for membership in the recurrence set.
+  string candidate = 2;
+}
+
+// Ask how many occurrences a recurrence produces.
+message CountRequest {
+  // The recurrence to count.
+  Recurrence recurrence = 1;
+  // Stop counting at this many occurrences. 0 means the maximum of 10000.
+  int32 limit = 2;
+}
+
+// A bare RFC 5545 RECUR value, for rule-level nodes that need no anchor.
+message RuleInput {
+  // The RRULE property value, with no "RRULE:" prefix. Max 2048 characters.
+  string rrule = 1;
+}
+
+// A generated RFC 5545 RECUR value.
+message RuleOutput {
+  // The rule in this package's canonical part order. Empty on error.
+  string rrule = 1;
+  // Set when the parts could not form a valid rule.
+  Error error = 2;
+}
+
+// An RFC 5545 recurrence rule decomposed into its individual parts. Repeated
+// fields are empty when the corresponding BY* part is absent from the rule.
+message RuleParts {
+  // FREQ: SECONDLY, MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, or YEARLY.
+  string freq = 1;
+  // INTERVAL: 0 when the rule omits it (the RFC default is 1). Never negative
+  // and never 0 in a rule that states it, since INTERVAL=0 is rejected.
+  int32 interval = 2;
+  // COUNT: 0 when the rule omits it.
+  int32 count = 3;
+  // UNTIL as an RFC 5545 instant; empty when the rule omits it.
+  string until = 4;
+  // BYDAY, e.g. ["MO","-1SU"].
+  repeated string byday = 5;
+  // BYMONTHDAY, 1..31 or -31..-1.
+  repeated int32 bymonthday = 6;
+  // BYMONTH, 1..12.
+  repeated int32 bymonth = 7;
+  // BYHOUR, 0..23.
+  repeated int32 byhour = 8;
+  // BYMINUTE, 0..59.
+  repeated int32 byminute = 9;
+  // BYSECOND, 0..60.
+  repeated int32 bysecond = 10;
+  // BYYEARDAY, 1..366 or -366..-1.
+  repeated int32 byyearday = 11;
+  // BYWEEKNO, 1..53 or -53..-1.
+  repeated int32 byweekno = 12;
+  // BYSETPOS, 1..366 or -366..-1.
+  repeated int32 bysetpos = 13;
+  // WKST: the two-letter week-start day; empty when the rule omits it.
+  string wkst = 14;
+  // Set when the rule could not be parsed.
+  Error error = 15;
+}
+
+// The verdict on whether a rule string is a valid RFC 5545 recurrence rule.
+message ValidationResult {
+  // True when the rule is well-formed RFC 5545 and this package will expand it.
+  bool valid = 1;
+  // The rule re-serialized in canonical part order. Empty when invalid.
+  string normalized = 2;
+  // Set when invalid, naming exactly which part was rejected.
+  Error error = 3;
+}
+
+// An ordered, ascending list of occurrence instants.
+message OccurrenceList {
+  // Occurrences in RFC 5545 form, ascending. Empty on error.
+  repeated string occurrences = 1;
+  // The number of entries in `occurrences`.
+  int32 count = 2;
+  // True when the recurrence had more occurrences than the effective limit,
+  // meaning `occurrences` was cut short rather than exhausted.
+  bool truncated = 3;
+  // Set when the request could not be served.
+  Error error = 4;
+}
+
+// A single occurrence instant, or the absence of one.
+message Occurrence {
+  // The occurrence in RFC 5545 form. Empty when `found` is false.
+  string occurrence = 1;
+  // False when the recurrence has no occurrence after the requested instant.
+  bool found = 2;
+  // Set when the request could not be served.
+  Error error = 3;
+}
+
+// Whether an instant belongs to a recurrence set.
+message Membership {
+  // True when the candidate instant is an occurrence of the recurrence.
+  bool contains = 1;
+  // Set when the request could not be served.
+  Error error = 2;
+}
+
+// How many occurrences a recurrence produces.
+message OccurrenceCount {
+  // The number of occurrences, capped at the effective limit.
+  int32 count = 1;
+  // True when the recurrence produces more occurrences than the effective
+  // limit, meaning `count` is a floor rather than the exact total.
+  bool truncated = 2;
+  // Set when the request could not be served.
+  Error error = 3;
+}
