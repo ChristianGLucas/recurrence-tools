@@ -68,7 +68,13 @@ INT_LIST_PARTS = (
 )
 
 _BARE_RECUR = re.compile(r"^[A-Za-z0-9=;,+\-]+$")
-_BYDAY = re.compile(r"^([+-]?\d{1,3})?(MO|TU|WE|TH|FR|SA|SU)$")
+# RFC 5545: byday = [weeknum] weekday, weeknum = [plus/minus] ordwk,
+# ordwk = 1*2DIGIT ;1 to 53. Two digits max, and the value is range-checked
+# below -- dateutil crashes with an IndexError on an out-of-range ordinal.
+_BYDAY = re.compile(r"^([+-]?\d{1,2})?(MO|TU|WE|TH|FR|SA|SU)$")
+# A month holds at most 5 of any weekday; a year at most 53.
+MAX_BYDAY_ORDINAL_MONTHLY = 5
+MAX_BYDAY_ORDINAL_YEARLY = 53
 _DATE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
 _DATETIME = re.compile(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$")
 
@@ -154,12 +160,13 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
             "BYSETPOS must be used together with another BY* rule part",
         )
 
+    freq = next((v.upper() for k, v in parts if k == "FREQ"), "")
     for key, value in parts:
-        _check_part(key, value)
+        _check_part(key, value, freq)
     return parts
 
 
-def _check_part(key: str, value: str) -> None:
+def _check_part(key: str, value: str, freq: str = "") -> None:
     if key == "FREQ":
         if value.upper() not in FREQS:
             raise _err(
@@ -198,8 +205,34 @@ def _check_part(key: str, value: str) -> None:
 
     if key == "BYDAY":
         for item in value.split(","):
-            if not _BYDAY.match(item.upper()):
+            match = _BYDAY.match(item.upper())
+            if not match:
                 raise _err("INVALID_RULE", f"invalid BYDAY entry '{item}'")
+            ordinal = match.group(1)
+            if ordinal is not None:
+                n = int(ordinal)
+                # RFC 5545 3.3.10: "The BYDAY rule part MUST NOT be specified
+                # with a numeric value when the FREQ rule part is not set to
+                # MONTHLY or YEARLY." dateutil silently ignores the prefix
+                # instead, quietly widening "the 2nd Monday" into "every Monday".
+                if freq not in ("MONTHLY", "YEARLY"):
+                    raise _err(
+                        "INVALID_RULE",
+                        f"BYDAY entry '{item}' has a numeric prefix, which "
+                        f"requires FREQ=MONTHLY or FREQ=YEARLY, not FREQ={freq or '?'}",
+                    )
+                # The meaningful range depends on the frequency: a month holds at
+                # most 5 of any weekday, a year at most 53. dateutil range-checks
+                # neither -- past its limit the iterator walks off its weekday
+                # mask and raises IndexError, and it does so on ITERATION, not on
+                # construction, so probing the rule alone cannot catch it.
+                limit = MAX_BYDAY_ORDINAL_MONTHLY if freq == "MONTHLY" else MAX_BYDAY_ORDINAL_YEARLY
+                if not 1 <= abs(n) <= limit:
+                    raise _err(
+                        "INVALID_RULE",
+                        f"BYDAY ordinal {n} in '{item}' is out of range for "
+                        f"FREQ={freq}; allowed 1..{limit} or -{limit}..-1",
+                    )
         return
 
     if key in INT_LIST_PARTS:
@@ -348,14 +381,28 @@ def localize(dt: datetime, zone: Optional[tzinfo]) -> datetime:
     return dt if zone is None else dt.replace(tzinfo=zone)
 
 
-def coerce(value: str, field: str, zone: Optional[tzinfo]) -> datetime:
+def coerce(value: str, field: str, zone: Optional[tzinfo],
+           anchor_kind: Optional[str] = None) -> datetime:
     """Parse an auxiliary instant into something comparable with the anchor.
 
     Mixing an aware anchor with a naive auxiliary value (or the reverse) raises
     TypeError deep inside dateutil's comparisons, so the mismatch is caught here
     and reported against the field that caused it.
+
+    A DATE/DATE-TIME mismatch is rejected for a different reason: it compares
+    cleanly but answers the wrong question. Testing the DATE-TIME "19970902T090000"
+    against a DATE-valued recurrence would silently compare 09:00 against
+    midnight and report a confident "not an occurrence" for a day the recurrence
+    does occur on.
     """
     dt, kind = parse_instant(value, field)
+    if anchor_kind is not None and (anchor_kind == KIND_DATE) != (kind == KIND_DATE):
+        expected = "a DATE ('19970902')" if anchor_kind == KIND_DATE else \
+            "a DATE-TIME ('19970902T090000')"
+        raise _err(
+            "INVALID_ARGUMENT",
+            f"{field} '{value}' must use the same form as dtstart; expected {expected}",
+        )
     if kind == KIND_UTC:
         if zone is None:
             raise _err(
@@ -396,7 +443,7 @@ class Expansion:
         return format_instant(dt, self.kind, self.zone)
 
     def instant(self, value: str, field: str) -> datetime:
-        return coerce(value, field, self.zone)
+        return coerce(value, field, self.zone, self.kind)
 
 
 def build(recurrence) -> Expansion:
@@ -431,9 +478,9 @@ def build(recurrence) -> Expansion:
     rset = rruleset(cache=False)
     rset.rrule(rule)
     for value in recurrence.rdate:
-        rset.rdate(coerce(value, "rdate", zone))
+        rset.rdate(coerce(value, "rdate", zone, kind))
     for value in recurrence.exdate:
-        rset.exdate(coerce(value, "exdate", zone))
+        rset.exdate(coerce(value, "exdate", zone, kind))
     return Expansion(rset, kind, zone)
 
 
@@ -445,7 +492,26 @@ def walk(exp: Expansion, budget: int = MAX_STEPS) -> Iterator[datetime]:
     terminate instead of running away.
     """
     steps = 0
-    for dt in exp.rset:
+    iterator = iter(exp.rset)
+    while True:
+        # Failures inside the expander surface HERE, on iteration, not when the
+        # rule was constructed -- so no amount of up-front rule checking can be
+        # relied on to have caught them. Anything that escapes becomes a
+        # structured error, because the alternative is a raw traceback (and its
+        # internal paths) reaching the caller. The node contract is that bad
+        # input is reported, never raised.
+        try:
+            dt = next(iterator)
+        except StopIteration:
+            return
+        except RecurError:
+            raise
+        except Exception as exc:
+            raise _err(
+                "INVALID_RULE",
+                f"the expander failed while producing occurrences: "
+                f"{type(exc).__name__}: {exc}",
+            )
         steps += 1
         if steps > budget:
             raise _err(

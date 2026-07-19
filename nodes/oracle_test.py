@@ -6,14 +6,21 @@ That is what makes this an oracle rather than a change-detector: the authority
 is the standards document, and it was written years before this package existed.
 
 Each case keeps the RFC's own DTSTART, its rule, and its stated occurrences.
-Several deliberately span the US EDT -> EST transition, where the RFC's expected
-output stays at 9:00 AM local -- so these also pin wall-clock preservation
-across a DST boundary, which is the whole reason `tzid` exists.
+Several span the US EDT -> EST transition, where the RFC's expected output stays
+at 9:00 AM local, so they pin the wall clock across a DST boundary.
+
+They do NOT, on their own, prove the zone is applied: occurrences are emitted as
+local wall-clock strings, so a wall-clock assertion survives `tzid` being
+ignored. The RFC annotates each occurrence with its zone (EDT vs EST) and this
+transcription cannot carry that dimension. `test_tzid_actually_changes_the_answer`
+covers it instead, by comparing against an absolute UTC window -- the one place
+the offset becomes observable.
 """
 
 import pytest
 
-from gen.messages_pb2 import ExpandRequest
+from gen.messages_pb2 import BetweenRequest, ExpandRequest
+from nodes.between import between
 from nodes.expand import expand
 from nodes.testkit import NY, FakeContext, recurrence
 
@@ -95,15 +102,49 @@ def test_rfc_bysetpos_second_to_last_weekday():
     ]
 
 
-# The DST claim the tzid field makes, stated directly: a weekly 09:00 meeting
-# in New York stays at 09:00 local across the March 2026 EST->EDT transition,
-# even though its UTC offset changes from -05:00 to -04:00.
+# The DST claim the tzid field makes: a weekly 09:00 meeting in New York stays
+# at 09:00 local across the March 2026 EST->EDT transition.
+#
+# Note what this test alone does NOT prove. Occurrences are emitted as local
+# wall-clock strings, so this assertion holds even if tzid were ignored outright
+# -- see test_tzid_actually_changes_the_answer below for the case that fails if
+# the zone is not applied. Both are needed: this one pins the wall clock, that
+# one pins that the zone is real.
 def test_wall_clock_survives_dst_transition():
     occurrences = first_n("FREQ=WEEKLY;COUNT=3", "20260305T090000", 5)
     assert occurrences == [
         "20260305T090000",  # EST (-05:00)
         "20260312T090000",  # EDT (-04:00) -- offset moved, wall clock did not
         "20260319T090000",
+    ]
+
+
+# The zone made observable. A UTC window is an ABSOLUTE instant, so comparing a
+# zoned recurrence against one exposes the offset the wall clock hides: 09:00 in
+# New York is 14:00Z in January but 13:00Z in July. The identical UTC window
+# therefore catches the occurrence in winter and misses it in summer -- an
+# assertion that fails if tzid is dropped, defaulted, or treated as UTC.
+def test_tzid_actually_changes_the_answer():
+    def window(dtstart, start, end):
+        result = between(
+            FakeContext(),
+            BetweenRequest(
+                recurrence=recurrence("FREQ=DAILY", dtstart, tzid=NY),
+                start=start, end=end,
+            ),
+        )
+        assert result.error.code == "", result.error.message
+        return list(result.occurrences)
+
+    # January: the 09:00 EST occurrence is 14:00Z, inside [13:30Z, 14:30Z).
+    assert window("20260105T090000", "20260105T133000Z", "20260105T143000Z") == [
+        "20260105T090000"
+    ]
+    # July: the 09:00 EDT occurrence is 13:00Z, so the SAME window misses it.
+    assert window("20260706T090000", "20260706T133000Z", "20260706T143000Z") == []
+    # It is found an hour earlier in UTC, confirming the offset really moved.
+    assert window("20260706T090000", "20260706T123000Z", "20260706T133000Z") == [
+        "20260706T090000"
     ]
 
 

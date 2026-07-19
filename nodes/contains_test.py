@@ -46,3 +46,21 @@ def test_unreachable_candidate_is_bounded():
 def test_invalid_candidate_returns_structured_error():
     r = run("FREQ=DAILY;COUNT=2", "20260101T000000", "sometime")
     assert r.error.code == "INVALID_DATETIME"
+
+
+def test_date_time_candidate_against_a_date_recurrence_is_rejected():
+    # Previously answered a confident contains=false: the DATE-TIME was compared
+    # as a wall clock against midnight, so a day the recurrence DOES occur on
+    # was reported as a non-occurrence.
+    r = run("FREQ=DAILY;COUNT=3", "19970902", "19970902T090000")
+    assert r.error.code == "INVALID_ARGUMENT"
+    assert "form" in r.error.message
+
+
+def test_date_candidate_against_a_date_recurrence_works():
+    assert run("FREQ=DAILY;COUNT=3", "19970902", "19970903").contains is True
+
+
+def test_date_candidate_against_a_date_time_recurrence_is_rejected():
+    r = run("FREQ=DAILY;COUNT=3", "19970902T090000", "19970903")
+    assert r.error.code == "INVALID_ARGUMENT"

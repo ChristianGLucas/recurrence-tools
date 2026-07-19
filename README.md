@@ -16,7 +16,7 @@ Written in **Python**, wrapping a battle-tested, permissively-licensed library:
 
 | Concern | Library | License |
 |---|---|---|
-| Recurrence expansion (`rrule`, `rruleset`) | [`python-dateutil`](https://github.com/dateutil/dateutil) | Apache-2.0 / BSD-3-Clause (dual) |
+| Recurrence expansion (`rrule`, `rruleset`) | [`python-dateutil`](https://github.com/dateutil/dateutil) | BSD-3-Clause (dual-licensed with Apache-2.0; its LICENSE extends BSD-3 over all code) |
 | `six` (dateutil's only dependency) | [`six`](https://github.com/benjaminp/six) | MIT |
 | IANA time-zone data | [`tzdata`](https://github.com/python/tzdata) | Apache-2.0 |
 
@@ -55,6 +55,13 @@ With `tzid` set, occurrences keep **wall-clock time across DST transitions** —
 a weekly 09:00 meeting in New York stays at 09:00 when the offset moves from
 −05:00 to −04:00. That is what a calendar means by "every week at 9".
 
+Because occurrences are emitted as local wall-clock strings, the zone is not
+visible in the output itself; it becomes observable when the recurrence is
+compared against an **absolute** instant. 09:00 in New York is `14:00Z` in
+January but `13:00Z` in July, so the same UTC window passed to `Between` — or
+the same UTC `UNTIL` — will include an occurrence in winter and exclude it in
+summer. That is the behaviour `tzid` buys you.
+
 ## Nodes
 
 ### Expansion — consume a `Recurrence`
@@ -90,6 +97,8 @@ changes what a rule means without telling anybody:
 | `COUNT` and `UNTIL` together | Accepted; `COUNT` silently wins | `INVALID_RULE` |
 | `BYMONTH=13`, `BYMONTHDAY=32`, `BYYEARDAY=400`, `BYWEEKNO=60` | Accepted; the rule simply never occurs | `INVALID_RULE` |
 | A lone `BYSETPOS` | Silently ignored | `INVALID_RULE` |
+| `BYDAY=8MO` with `FREQ=MONTHLY` (a month has ≤5 of any weekday) | **Crashes with `IndexError` from inside the iterator** | `INVALID_RULE` |
+| `BYDAY=2MO` with `FREQ=WEEKLY` | Prefix silently dropped, widening "the 2nd Monday" to "every Monday" | `INVALID_RULE` |
 | `DTSTART:`/`EXDATE:` smuggled into the rule string | Parsed, **silently overriding the caller's own anchor** | `INVALID_RULE` |
 
 The `rrule` field must be a **bare RECUR value** — `KEY=VALUE` pairs joined by

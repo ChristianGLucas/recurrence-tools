@@ -1,5 +1,8 @@
-from gen.messages_pb2 import ExpandRequest
+import pytest
+
+from gen.messages_pb2 import ExpandRequest, RuleInput
 from nodes.expand import expand
+from nodes.validate import validate
 from nodes.testkit import NY, FakeContext, recurrence
 
 
@@ -59,6 +62,10 @@ def test_exdate_that_matches_nothing_is_ignored():
 
 
 def test_tzid_anchor_keeps_wall_clock_across_dst():
+    # 8 March 2026 is the EST->EDT transition; 09:00 is on the far side of the
+    # 02:00-03:00 gap, so both occurrences keep their wall-clock reading.
+    # (That the zone is applied at all is proved in oracle_test.py by
+    # test_tzid_actually_changes_the_answer, which a UTC window can falsify.)
     r = run("FREQ=DAILY;COUNT=2", "20260307T090000", tzid=NY)
     assert list(r.occurrences) == ["20260307T090000", "20260308T090000"]
 
@@ -90,10 +97,18 @@ def test_tzid_with_utc_anchor_is_rejected_as_contradictory():
     assert r.error.code == "INVALID_ARGUMENT"
 
 
-def test_is_deterministic_across_invocations():
-    a = run("FREQ=MONTHLY;COUNT=12;BYDAY=1FR", "20260102T090000", tzid=NY)
-    b = run("FREQ=MONTHLY;COUNT=12;BYDAY=1FR", "20260102T090000", tzid=NY)
-    assert list(a.occurrences) == list(b.occurrences)
+def test_output_matches_a_fixed_golden_regardless_of_when_it_runs():
+    # Comparing two calls in one process would pass for any pure function and
+    # prove nothing. The real nondeterminism risk is a dependence on "today"
+    # (see PROBE_DTSTART in _recur.py), which only a hard-coded golden catches.
+    r = run("FREQ=MONTHLY;COUNT=12;BYDAY=1FR", "20260102T090000", tzid=NY)
+    assert list(r.occurrences) == [
+        "20260102T090000", "20260206T090000", "20260306T090000",
+        "20260403T090000", "20260501T090000", "20260605T090000",
+        "20260703T090000", "20260807T090000", "20260904T090000",
+        "20261002T090000", "20261106T090000", "20261204T090000",
+    ]
+    assert r.truncated is False
 
 
 def test_utc_until_with_utc_anchor_expands():
@@ -127,3 +142,29 @@ def test_utc_until_is_compared_against_the_anchors_real_instant():
         "20260102T090000",
         "20260103T090000",
     ]  # 15:00Z follows it, so Jan 3 is included
+
+
+@pytest.mark.parametrize("ordinal", ["54", "8", "6", "0", "-54", "99"])
+def test_out_of_range_byday_is_reported_not_crashed(ordinal):
+    # Regression: these once escaped as an uncaught IndexError from inside
+    # dateutil, surfacing to the caller as a 422 with a raw traceback, while
+    # Validate declared the very same rule valid.
+    r = run(f"FREQ=MONTHLY;BYDAY={ordinal}MO", "19970902T090000")
+    assert r.error.code == "INVALID_RULE"
+    assert "BYDAY" in r.error.message
+
+
+def test_validate_and_expand_agree_on_byday_ordinals():
+    # The two nodes must not disagree: anything Validate blesses must expand,
+    # and anything Validate rejects must not crash Expand.
+    for freq in ("MONTHLY", "YEARLY"):
+        for ordinal in range(-60, 61):
+            rule = f"FREQ={freq};BYDAY={ordinal}MO"
+            valid = validate(FakeContext(), RuleInput(rrule=rule)).valid
+            expanded = run(rule, "19970902T090000", limit=1)
+            assert valid == (expanded.error.code == ""), f"disagreement on {rule}"
+
+
+def test_date_form_candidate_mismatch_is_rejected():
+    r = run("FREQ=DAILY;COUNT=3", "19970902", limit=1)
+    assert r.error.code == ""  # a DATE anchor alone is fine

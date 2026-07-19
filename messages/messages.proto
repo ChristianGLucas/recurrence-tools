@@ -40,7 +40,12 @@ message Recurrence {
   string rrule = 1;
   // RFC 5545 DTSTART, the anchor the rule expands from. Required. Its form
   // (DATE, floating DATE-TIME, or UTC DATE-TIME) determines the form of every
-  // occurrence emitted.
+  // occurrence emitted, and every other instant in the request must use a
+  // matching form.
+  //
+  // One value does not round-trip: a leap second (":60") is clamped to ":59",
+  // because RFC 5545 permits it but the underlying time type cannot represent
+  // it. Occurrences are then emitted at :59.
   string dtstart = 2;
   // Optional IANA time-zone id (e.g. "America/New_York") that `dtstart` is local
   // to. Occurrences then keep wall-clock time across DST transitions, which is

@@ -94,7 +94,10 @@ def test_accepts_legal_negative_by_parts():
     # The range checks must not over-reach: negative offsets are legal RFC.
     assert reject("FREQ=MONTHLY;BYMONTHDAY=-1") is None
     assert reject("FREQ=YEARLY;BYYEARDAY=-366") is None
-    assert reject("FREQ=WEEKLY;BYDAY=-1SU") is None
+    # "the last Sunday of the month" -- a numeric BYDAY prefix is legal on
+    # MONTHLY/YEARLY only, which is why this is not FREQ=WEEKLY.
+    assert reject("FREQ=MONTHLY;BYDAY=-1SU") is None
+    assert reject("FREQ=WEEKLY;BYDAY=SU") is None
 
 
 # --- Property smuggling through the rule field ------------------------------
@@ -219,3 +222,55 @@ def test_accepts_floating_until():
 
 def test_accepts_date_valued_until():
     assert reject("FREQ=WEEKLY;UNTIL=20260110") is None
+
+
+# --- BYDAY ordinal: dateutil crashes from INSIDE the iterator --------------
+
+def test_dateutil_crashes_on_an_out_of_range_byday_ordinal():
+    # Observed: constructing the rule succeeds, so a construction-time probe
+    # cannot see this. The IndexError only appears once the iterator walks off
+    # its weekday mask -- which is why the guard has to be a range check and why
+    # walk() also has to contain anything the expander throws.
+    rule = rrulestr("FREQ=MONTHLY;BYDAY=54MO", dtstart=ANCHOR)  # no exception
+    with pytest.raises(IndexError):
+        next(iter(rule))
+
+
+@pytest.mark.parametrize("ordinal", [0, 6, 8, 54, 99, -6, -54, -99])
+def test_rejects_out_of_range_monthly_byday_ordinals(ordinal):
+    # A month has at most 5 of any weekday. dateutil returns empty for 6..7 and
+    # crashes from 8 up; both are rejected here as the nonsense they are.
+    assert reject(f"FREQ=MONTHLY;BYDAY={ordinal}MO") == "INVALID_RULE"
+
+
+@pytest.mark.parametrize("ordinal", [0, 54, 56, 99, -54, -99])
+def test_rejects_out_of_range_yearly_byday_ordinals(ordinal):
+    assert reject(f"FREQ=YEARLY;BYDAY={ordinal}MO") == "INVALID_RULE"
+
+
+@pytest.mark.parametrize("entry", ["1MO", "5MO", "-1SU", "-5FR", "+2WE", "TH"])
+def test_accepts_in_range_monthly_byday_ordinals(entry):
+    assert reject(f"FREQ=MONTHLY;BYDAY={entry}") is None
+
+
+@pytest.mark.parametrize("entry", ["1MO", "53MO", "-53FR", "20TU", "TH"])
+def test_accepts_in_range_yearly_byday_ordinals(entry):
+    assert reject(f"FREQ=YEARLY;BYDAY={entry}") is None
+
+
+@pytest.mark.parametrize("freq", ["DAILY", "WEEKLY", "HOURLY", "SECONDLY"])
+def test_rejects_a_numeric_byday_prefix_on_the_wrong_frequency(freq):
+    # RFC 5545 forbids it; dateutil silently drops the prefix, widening
+    # "the 2nd Monday" into "every Monday".
+    assert reject(f"FREQ={freq};BYDAY=2MO") == "INVALID_RULE"
+    assert reject(f"FREQ={freq};BYDAY=MO") is None  # bare weekday still fine
+
+
+def test_dateutil_silently_ignores_a_numeric_byday_prefix_on_weekly():
+    got = list(itertools.islice(rrulestr("FREQ=WEEKLY;BYDAY=2MO", dtstart=ANCHOR), 3))
+    plain = list(itertools.islice(rrulestr("FREQ=WEEKLY;BYDAY=MO", dtstart=ANCHOR), 3))
+    assert got == plain  # the "2nd" was discarded, not honoured
+
+
+def test_three_digit_byday_ordinal_is_rejected_by_shape():
+    assert reject("FREQ=MONTHLY;BYDAY=999MO") == "INVALID_RULE"

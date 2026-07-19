@@ -1,5 +1,7 @@
 # Pinned for determinism. Full transitive tree, all permissive:
-#   python-dateutil — dual Apache-2.0 / BSD-3-Clause (owns recurrence expansion)
+#   python-dateutil — dual-licensed; relied on here under BSD-3-Clause, which its
+#                     LICENSE states applies to all code including the portion
+#                     also covered by Apache-2.0 (owns recurrence expansion)
 #   six             — MIT (dateutil's only dependency)
 #   tzdata          — Apache-2.0 (IANA zone data, so tzid resolution does not
 #                     depend on the host image carrying a system zoneinfo db)
