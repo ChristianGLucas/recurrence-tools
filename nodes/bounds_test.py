@@ -17,6 +17,7 @@ right answer after two minutes is not a bound.
 """
 
 import time
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -382,8 +383,12 @@ def test_sparse_rules_at_every_limit_return_data_not_an_error(rule, limit):
     )
     assert result.error.code == "", result.error.message
     assert result.count > 0
-    if result.count < limit:
-        assert result.truncated is True, "a short answer must be flagged"
+    # Every rule here is unbounded (no COUNT, no UNTIL), so more occurrences
+    # always exist beyond whatever was returned. Asserting that unconditionally
+    # keeps the check alive: a version guarded on `count < limit` would quietly
+    # stop running if the bound ever stopped firing.
+    assert result.count <= limit
+    assert result.truncated is True
     assert elapsed < 2.5, f"took {elapsed:.1f}s"
 
 
@@ -515,3 +520,129 @@ def test_the_backstop_leaves_no_child_behind(monkeypatch):
             ),
         )
     assert multiprocessing.active_children() == []
+
+
+# --- Zones whose DST shift does not divide the rule's step ------------------
+#
+# Occurrences arrive in LOCAL order but are compared in UTC, and a spring-forward
+# gap breaks the correspondence: in New York a rule at 02:00/02:30/03:00/03:30
+# local maps to 07:00Z/07:30Z/07:00Z/07:30Z -- the third goes BACKWARDS. Every
+# earlier DST test used New York at :30 past the hour, where a whole-hour shift
+# lands the reordered instants on identical UTC keys and hides the disorder
+# completely.
+
+REORDERING_CASES = [
+    # zone, rule, dtstart -- each crosses a spring-forward transition
+    ("Australia/Lord_Howe", "FREQ=MINUTELY;INTERVAL=20", "20261004T020000"),  # 30-min shift
+    ("Pacific/Chatham", "FREQ=MINUTELY;INTERVAL=20", "20260927T020000"),      # 45-min offset
+    ("America/Santiago", "FREQ=MINUTELY;INTERVAL=25", "20260906T230000"),
+    ("America/New_York", "FREQ=DAILY;BYHOUR=2,3;BYMINUTE=0,30;BYSECOND=0", "20260308T020000"),
+    ("Europe/Dublin", "FREQ=MINUTELY;INTERVAL=20", "20260329T003000"),
+]
+
+
+def _utc_form(local_text, zone):
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+
+    naive = datetime.strptime(local_text, "%Y%m%dT%H%M%S")
+    return (
+        naive.replace(tzinfo=ZoneInfo(zone))
+        .astimezone(timezone.utc)
+        .strftime("%Y%m%dT%H%M%SZ")
+    )
+
+
+@pytest.mark.parametrize("zone,rule,dtstart", REORDERING_CASES)
+def test_every_occurrence_expand_emits_is_findable(zone, rule, dtstart):
+    """The invariant that catches DST reordering: nodes must agree with Expand.
+
+    For each occurrence Expand returns, Contains must confirm it -- in the form
+    Expand emitted AND in absolute UTC form -- and Between must return it from a
+    window bracketing its instant. Any disagreement means one node is silently
+    losing a real occurrence.
+    """
+    def rec():
+        return recurrence(rule, dtstart, tzid=zone)
+
+    expanded = expand(FakeContext(), ExpandRequest(recurrence=rec(), limit=8))
+    assert expanded.error.code == "", expanded.error.message
+    assert expanded.count > 0
+
+    for emitted in expanded.occurrences:
+        as_utc = _utc_form(emitted, zone)
+
+        local_hit = contains(
+            FakeContext(), ContainsRequest(recurrence=rec(), candidate=emitted)
+        )
+        assert local_hit.contains is True, f"Contains lost {emitted} ({zone})"
+
+        utc_hit = contains(
+            FakeContext(), ContainsRequest(recurrence=rec(), candidate=as_utc)
+        )
+        assert utc_hit.contains is True, f"Contains lost {emitted} as {as_utc} ({zone})"
+
+        # A one-minute window opening exactly on the occurrence's instant.
+        end_utc = (
+            datetime.strptime(as_utc, "%Y%m%dT%H%M%SZ") + timedelta(minutes=1)
+        ).strftime("%Y%m%dT%H%M%SZ")
+        window = between(
+            FakeContext(),
+            BetweenRequest(recurrence=rec(), start=as_utc, end=end_utc),
+        )
+        assert window.error.code == "", window.error.message
+        assert emitted in list(window.occurrences), (
+            f"Between lost {emitted} from [{as_utc},{end_utc}) ({zone})"
+        )
+
+
+@pytest.mark.parametrize("zone,rule,dtstart", REORDERING_CASES)
+def test_next_occurrence_returns_the_earliest_not_the_first_seen(zone, rule, dtstart):
+    """Across a gap the first occurrence in LOCAL order is not always the
+    earliest in UTC, so a search that returns the first one it sees skips a
+    real occurrence."""
+    def rec():
+        return recurrence(rule, dtstart, tzid=zone)
+
+    expanded = expand(FakeContext(), ExpandRequest(recurrence=rec(), limit=8))
+    keys = sorted((_utc_form(o, zone), o) for o in expanded.occurrences)
+    earliest_utc, earliest_local = keys[0]
+
+    # Ask for the next occurrence strictly after one second before the earliest.
+    before = earliest_utc[:-3] + "00Z" if earliest_utc.endswith("00Z") else earliest_utc
+    result = next_occurrence(
+        FakeContext(), NextRequest(recurrence=rec(), after=before)
+    )
+    assert result.error.code == "", result.error.message
+    assert result.found is True
+    # Whatever it returns must be the UTC-earliest of the candidates after that
+    # instant -- never a later one skipped past.
+    returned_utc = _utc_form(result.occurrence, zone)
+    later = [u for u, _ in keys if u > before]
+    assert returned_utc == min(later), (
+        f"{zone}: returned {result.occurrence} ({returned_utc}), "
+        f"earliest available was {min(later)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=YEARLY;BYMONTH=13;BYMONTHDAY=30",
+        "FREQ=YEARLY;BYMONTH=0;BYMONTHDAY=1",
+        "FREQ=YEARLY;BYMONTH=x;BYMONTHDAY=1",
+        "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=y",
+    ],
+)
+def test_feasibility_check_never_raises_on_unvalidated_values(rule):
+    """It reasons over integers, so it must run AFTER they are validated.
+
+    Running first meant an out-of-range or non-numeric BYMONTH reached it
+    unchecked and escaped as a raw ValueError -- a traceback with internal paths
+    reaching the caller, from the nodes that do not run in the isolated worker.
+    """
+    result = validate(FakeContext(), RuleInput(rrule=rule))
+    assert result.valid is False
+    assert result.error.code == "INVALID_RULE"
+    assert "Traceback" not in result.error.message
+    assert "ValueError" not in result.error.message

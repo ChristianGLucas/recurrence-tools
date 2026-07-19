@@ -2,7 +2,7 @@ from gen.messages_pb2 import BetweenRequest, OccurrenceList
 from gen.axiom_context import AxiomContext
 
 from nodes import _recur
-from nodes._recur import RecurError, build, cmp_key, effective_limit, walk
+from nodes._recur import REORDER_MARGIN, RecurError, build, cmp_key, effective_limit, walk
 
 
 def _compute(ax: AxiomContext, input: BetweenRequest) -> OccurrenceList:
@@ -23,8 +23,10 @@ def _compute(ax: AxiomContext, input: BetweenRequest) -> OccurrenceList:
         for dt in walk(exp):
             if cmp_key(dt) < start_key:
                 continue
-            if cmp_key(dt) >= end_key:
+            if cmp_key(dt) >= end_key + REORDER_MARGIN:
                 break
+            if cmp_key(dt) >= end_key:
+                continue
             if len(occurrences) == limit:
                 truncated = True
                 break

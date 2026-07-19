@@ -2,7 +2,7 @@ from gen.messages_pb2 import ContainsRequest, Membership
 from gen.axiom_context import AxiomContext
 
 from nodes import _recur
-from nodes._recur import RecurError, build, cmp_key, walk
+from nodes._recur import REORDER_MARGIN, RecurError, build, cmp_key, walk
 
 
 def _compute(ax: AxiomContext, input: ContainsRequest) -> Membership:
@@ -14,7 +14,7 @@ def _compute(ax: AxiomContext, input: ContainsRequest) -> Membership:
         for dt in walk(exp):
             if cmp_key(dt) == key:
                 return Membership(contains=True)
-            if cmp_key(dt) > key:
+            if cmp_key(dt) > key + REORDER_MARGIN:
                 break
         else:
             # Reaching the end without passing the candidate means either the

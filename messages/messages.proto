@@ -77,7 +77,8 @@ message ExpandRequest {
   // The recurrence to expand.
   Recurrence recurrence = 1;
   // How many occurrences to return. 0 means the default of 100; the maximum
-  // is 10000.
+  // accepted is 10000. It is a ceiling, not a promise: a sparse rule can hit
+  // the scan budget first and return fewer, flagged `truncated`.
   int32 limit = 2;
 }
 
@@ -90,7 +91,8 @@ message BetweenRequest {
   // Window end, EXCLUSIVE. An RFC 5545 instant compatible with `dtstart`.
   // Must be strictly after `start`.
   string end = 3;
-  // Cap on returned occurrences. 0 means the default of 100; maximum 10000.
+  // Cap on returned occurrences. 0 means the default of 100; maximum accepted
+  // is 10000. A ceiling, not a promise -- see ExpandRequest.limit.
   int32 limit = 4;
 }
 

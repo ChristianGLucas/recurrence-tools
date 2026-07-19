@@ -24,7 +24,7 @@ module does three jobs around it, and deliberately nothing more:
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Iterable, Iterator, List, Optional, Tuple
 
 from dateutil.rrule import rrulestr, rruleset
@@ -214,8 +214,6 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
             "BYSETPOS must be used together with another BY* rule part",
         )
 
-    _check_month_day_feasible(parts)
-
     freq = next((v.upper() for k, v in parts if k == "FREQ"), "")
 
     # RFC 5545 3.3.10 forbids certain BY* parts at certain frequencies. dateutil
@@ -233,6 +231,10 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
 
     for key, value in parts:
         _check_part(key, value, freq)
+
+    # Only once every part has been range- and type-checked: this reasons over
+    # the values, so running it first would hand it input nobody had validated.
+    _check_month_day_feasible(parts)
     return parts
 
 
@@ -246,9 +248,15 @@ def _check_month_day_feasible(parts: List[Tuple[str, str]]) -> None:
     by = {k: v for k, v in parts}
     if "BYMONTH" not in by or "BYMONTHDAY" not in by:
         return
-    months = [int(v) for v in by["BYMONTH"].split(",")]
-    days = [abs(int(v)) for v in by["BYMONTHDAY"].split(",")]
-    longest = max(DAYS_IN_MONTH[m - 1] for m in months if 1 <= m <= 12)
+    try:
+        months = [int(v) for v in by["BYMONTH"].split(",")]
+        days = [abs(int(v)) for v in by["BYMONTHDAY"].split(",")]
+    except ValueError:  # pragma: no cover - _check_part rejects these first
+        return
+    in_range = [DAYS_IN_MONTH[m - 1] for m in months if 1 <= m <= 12]
+    if not in_range or not days:
+        return
+    longest = max(in_range)
     if min(days) > longest:
         raise _err(
             "INVALID_RULE",
@@ -506,6 +514,22 @@ def zone_for(kind: str, tzid: str) -> Optional[tzinfo]:
                 "INVALID_ARGUMENT", f"unknown IANA time-zone id '{echo(tzid)}'"
             )
     return timezone.utc if kind == KIND_UTC else None
+
+
+# How far an occurrence can move relative to its neighbours when a zone shifts.
+#
+# Occurrences arrive in LOCAL order, but comparisons happen in UTC, and a
+# spring-forward gap breaks the correspondence: in New York a rule firing at
+# 02:00, 02:30, 03:00 and 03:30 local on a transition day maps to 07:00Z,
+# 07:30Z, 07:00Z, 07:30Z -- the third instant goes BACKWARDS in UTC. Any search
+# that stops the moment it passes its target would stop one occurrence too
+# early and silently lose a real one.
+#
+# The displacement is bounded by the size of the shift (never more than a couple
+# of hours anywhere in the tz database), so every early break carries this
+# margin: keep looking a little past the target before concluding there is
+# nothing more.
+REORDER_MARGIN = timedelta(hours=3)
 
 
 def cmp_key(dt: datetime) -> datetime:

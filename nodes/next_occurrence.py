@@ -2,7 +2,7 @@ from gen.messages_pb2 import NextRequest, Occurrence
 from gen.axiom_context import AxiomContext
 
 from nodes import _recur
-from nodes._recur import RecurError, build, cmp_key, walk
+from nodes._recur import REORDER_MARGIN, RecurError, build, cmp_key, walk
 
 
 def _compute(ax: AxiomContext, input: NextRequest) -> Occurrence:
@@ -10,9 +10,19 @@ def _compute(ax: AxiomContext, input: NextRequest) -> Occurrence:
         exp = build(input.recurrence)
         after = exp.instant(input.after, "after") if input.after else None
         after_key = cmp_key(after) if after is not None else None
+        best = None
         for dt in walk(exp):
-            if after_key is None or cmp_key(dt) > after_key:
-                return Occurrence(occurrence=exp.format(dt), found=True)
+            key = cmp_key(dt)
+            if after_key is not None and key <= after_key:
+                continue
+            if best is None or key < cmp_key(best):
+                best = dt
+            if key > cmp_key(best) + REORDER_MARGIN:
+                # Far enough past the best candidate that nothing later can
+                # undercut it, even across a zone shift.
+                break
+        if best is not None:
+            return Occurrence(occurrence=exp.format(best), found=True)
         if exp.budget_exhausted:
             # Unlike a list, a single "next" cannot be returned partially: the
             # search stopped early, so "none remains" would be a wrong answer.
