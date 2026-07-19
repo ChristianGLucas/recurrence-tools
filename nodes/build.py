@@ -63,7 +63,10 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
             parts.append(("WKST", input.wkst))
 
         if not parts:
-            raise RecurError("INVALID_ARGUMENT", "no rule parts were supplied")
+            # Same code as every other node gives for an empty request; an
+            # identical caller mistake must not get a different classification
+            # depending on which node received it.
+            raise RecurError("INVALID_RULE", "no rule parts were supplied")
 
         rule = canonical_rule(parts)
         check_rule(rule)

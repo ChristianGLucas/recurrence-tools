@@ -214,6 +214,8 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
             "BYSETPOS must be used together with another BY* rule part",
         )
 
+    _check_month_day_feasible(parts)
+
     freq = next((v.upper() for k, v in parts if k == "FREQ"), "")
 
     # RFC 5545 3.3.10 forbids certain BY* parts at certain frequencies. dateutil
@@ -232,6 +234,28 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
     for key, value in parts:
         _check_part(key, value, freq)
     return parts
+
+
+# The longest each month can be. A BYMONTH/BYMONTHDAY pair outside this can
+# never occur, and asking the expander to discover that costs seconds of
+# scanning to the year ceiling -- so it is refused up front, deterministically.
+DAYS_IN_MONTH = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+
+def _check_month_day_feasible(parts: List[Tuple[str, str]]) -> None:
+    by = {k: v for k, v in parts}
+    if "BYMONTH" not in by or "BYMONTHDAY" not in by:
+        return
+    months = [int(v) for v in by["BYMONTH"].split(",")]
+    days = [abs(int(v)) for v in by["BYMONTHDAY"].split(",")]
+    longest = max(DAYS_IN_MONTH[m - 1] for m in months if 1 <= m <= 12)
+    if min(days) > longest:
+        raise _err(
+            "INVALID_RULE",
+            f"BYMONTHDAY={by['BYMONTHDAY']} can never occur in "
+            f"BYMONTH={by['BYMONTH']}; the longest of those months has "
+            f"{longest} days",
+        )
 
 
 def _check_part(key: str, value: str, freq: str = "") -> None:
@@ -385,12 +409,18 @@ def _canonical_value(key: str, value: str) -> str:
         # Strip a redundant leading '+' so "+1MO" and "1MO" -- the same rule --
         # normalize identically. INT_LIST_PARTS already does this via int();
         # leaving BYDAY out made `normalized` unusable as an equality key.
-        return ",".join(
-            (item[1:] if item.startswith("+") else item).upper()
-            for item in value.split(",")
-        )
+        seen = []
+        for item in value.split(","):
+            entry = (item[1:] if item.startswith("+") else item).upper()
+            if entry not in seen:
+                seen.append(entry)
+        return ",".join(seen)
     if key in INT_LIST_PARTS:
-        return ",".join(str(int(item)) for item in value.split(","))
+        # De-duplicated and ordered: two spellings of the same rule must produce
+        # the same canonical text, or `normalized` cannot serve as a key.
+        return ",".join(
+            str(n) for n in sorted({int(item) for item in value.split(",")})
+        )
     if key in ("INTERVAL", "COUNT"):
         return str(int(value))
     return value
@@ -458,6 +488,15 @@ def zone_for(kind: str, tzid: str) -> Optional[tzinfo]:
                 "INVALID_ARGUMENT",
                 "tzid must not be set when dtstart is already UTC (ends with 'Z')",
             )
+        # "localtime" and "Factory" resolve through host configuration rather
+        # than to a fixed zone, so the same request would expand differently on
+        # different machines. A canonical IANA id always names a region.
+        if "/" not in tzid:
+            raise _err(
+                "INVALID_ARGUMENT",
+                f"tzid '{echo(tzid)}' is not a canonical IANA time-zone id; "
+                "use a region-qualified name such as 'America/New_York'",
+            )
         try:
             from zoneinfo import ZoneInfo
 
@@ -467,6 +506,22 @@ def zone_for(kind: str, tzid: str) -> Optional[tzinfo]:
                 "INVALID_ARGUMENT", f"unknown IANA time-zone id '{echo(tzid)}'"
             )
     return timezone.utc if kind == KIND_UTC else None
+
+
+def cmp_key(dt: datetime) -> datetime:
+    """A comparison key that survives PEP 495 fold semantics.
+
+    On a fall-back day a local time occurs twice, and Python marks such an
+    instant "fold-affected". Comparing one against an equal instant in another
+    zone returns False for ==, > AND < simultaneously -- it is neither equal nor
+    ordered. Comparing zone-local values directly therefore makes an occurrence
+    vanish from an equality test while still passing a range test, which is how
+    Contains and Between came to disagree about the same instant.
+
+    Normalising to UTC first removes the ambiguity, because a UTC instant is
+    never fold-affected.
+    """
+    return dt.astimezone(timezone.utc) if dt.tzinfo is not None else dt
 
 
 def localize(dt: datetime, zone: Optional[tzinfo]) -> datetime:
@@ -548,8 +603,6 @@ class Expansion:
 
 def build(recurrence) -> Expansion:
     """Turn a Recurrence message into a bounded, validated Expansion."""
-    if recurrence is None:
-        raise _err("INVALID_ARGUMENT", "recurrence is required")
     if recurrence.error.code:
         # An upstream node already diagnosed this precisely. Re-deriving from the
         # empty fields that came with it would replace the real reason with a
@@ -721,11 +774,17 @@ def isolate(module_name: str, input_msg):
     try:
         ctx = multiprocessing.get_context("fork")
     except ValueError:  # pragma: no cover - platform without fork
-        import importlib
-
-        return importlib.import_module(module_name).compute(
-            input_msg.SerializeToString()
-        ), None
+        # Running inline here would silently drop the wall-clock backstop, so a
+        # rule that returns LIMIT_EXCEEDED elsewhere would hang the worker
+        # instead. Refusing is the honest outcome: the guarantee is either
+        # enforced or the request is declined, never quietly unenforced.
+        return None, {
+            "code": "LIMIT_EXCEEDED",
+            "message": (
+                "expansion requires an isolated worker, which this platform "
+                "cannot provide, so the time bound cannot be enforced"
+            ),
+        }
 
     channel = ctx.Queue(1)
     proc = ctx.Process(

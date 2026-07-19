@@ -102,13 +102,17 @@ changes what a rule means without telling anybody:
 | Input | dateutil's behaviour | Here |
 |---|---|---|
 | `BYWEEKNO` on any `FREQ` but `YEARLY`; `BYYEARDAY` on `DAILY`/`WEEKLY`/`MONTHLY`; `BYMONTHDAY` on `WEEKLY` | Accepted, though RFC 5545 §3.3.10 forbids each | `INVALID_RULE` |
-| `INTERVAL=0` | Yields the same instant forever — an unbounded generator that never advances | `INVALID_RULE` |
+| `INTERVAL=0` | Yields the same instant forever — an unbounded generator that never advances | `INVALID_RULE` \* |
 | `COUNT` and `UNTIL` together | Accepted; `COUNT` silently wins | `INVALID_RULE` |
 | `BYMONTH=13`, `BYMONTHDAY=32`, `BYYEARDAY=400`, `BYWEEKNO=60` | Accepted; the rule simply never occurs | `INVALID_RULE` |
 | A lone `BYSETPOS` | Silently ignored | `INVALID_RULE` |
 | `BYDAY=8MO` with `FREQ=MONTHLY` (a month has ≤5 of any weekday) | **Crashes with `IndexError` from inside the iterator** | `INVALID_RULE` |
 | `BYDAY=2MO` with `FREQ=WEEKLY` | Prefix silently dropped, widening "the 2nd Monday" to "every Monday" | `INVALID_RULE` |
 | `DTSTART:`/`EXDATE:` smuggled into the rule string | Parsed, **silently overriding the caller's own anchor** | `INVALID_RULE` |
+
+\* In `Build`, `interval: 0` is the protobuf sentinel for "part omitted", so it
+drops `INTERVAL` from the assembled rule rather than rejecting it. Every node
+that parses a rule *string* rejects a literal `INTERVAL=0`.
 
 The `rrule` field must be a **bare RECUR value** — `KEY=VALUE` pairs joined by
 `;`, with no `RRULE:` prefix, no `:`, and no line break. A RECUR value never
@@ -130,6 +134,7 @@ hang:
 | `COUNT` inside a rule | 10000 | `LIMIT_EXCEEDED` |
 | Occurrences visited | 200000 | `truncated` (or `LIMIT_EXCEEDED`, below) |
 | **Candidate instants examined** | **20,000,000** | `truncated` (or `LIMIT_EXCEEDED`, below) |
+| Impossible `BYMONTH`/`BYMONTHDAY` pair | refused up front | `INVALID_RULE` |
 | Wall-clock backstop | 3 seconds | `LIMIT_EXCEEDED` |
 | `limit` argument | 10000 (default 100; `Count` defaults to 10000) | `INVALID_ARGUMENT` |
 
@@ -141,7 +146,7 @@ between the occurrences themselves, so it is a count rather than a clock: the
 same request stops at the same place on every machine and every run.
 
 A large `limit` on a sparse rule therefore returns **fewer occurrences than
-asked for, flagged `truncated`** — real, correct occurrences, and an honest
+asked for, flagged `truncated`** — real, correct occurrences, plus an honest
 signal that more exist. It is never an error blaming the rule for being costly.
 
 `NextOccurrence` and `Contains` have no partial form: a single answer cannot be
@@ -149,16 +154,28 @@ half-given. When the budget stops them before they reach an answer they return
 `LIMIT_EXCEEDED`, because reporting "no next occurrence" or "not a member" from
 an unfinished search would be a wrong answer stated with confidence.
 
+**Rules that can never occur are refused up front.** `BYMONTH=2;BYMONTHDAY=30`
+has no answer to find — February has no 30th — and the expander would only
+discover that by scanning to year 9999. A calendar fact settles it in
+microseconds instead, with an error naming the real problem.
+
 **The wall-clock backstop is deliberately not the primary bound.** A clock is
-not deterministic; if it decided requests, identical input would return
-different answers under different load. It exists for the one case a count
-cannot reach: a rule that is valid and matches *nothing* —
-`FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30`, since February has no 30th — yields no
-occurrences at all, so there are no gaps to charge for, while the expander scans
-toward year 9999 inside a single library call where no deadline could be
-checked. Each expansion therefore runs in a child process that is killed at 3
-seconds. It sits well above the slowest request the scan budget permits (~1.2s),
-so it cannot fire on a request that is making progress.
+not deterministic; if it decided requests, identical input could return
+different answers under different load. It covers only the residue: a rule that
+yields nothing, is not caught by the feasibility check above, and would
+otherwise scan inside a single library call where no deadline can be checked.
+Each expansion runs in a child process killed at 3 seconds. Every case
+measured — including the pathological ones — now completes in well under 0.5s,
+so the backstop has roughly sixfold headroom and is not expected to fire on any
+real input. If a platform cannot provide an isolated worker, the request is
+refused rather than run unbounded.
+
+**Determinism, precisely.** For every rule that yields occurrences, the result is
+determined by the input alone: the budgets are counts, so the same request gives
+the same answer on any machine. The one exception is the backstop above — a rule
+pathological enough to reach it could, on a sufficiently slow host, return
+`LIMIT_EXCEEDED` where a faster host returned an answer. No such input is
+currently known.
 
 **The caller's rule is never rewritten.** An earlier version bounded cost by
 injecting a synthesized `UNTIL`, which silently changed the answer for sparse

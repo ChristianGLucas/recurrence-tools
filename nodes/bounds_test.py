@@ -35,6 +35,7 @@ from nodes.count import count
 from nodes.expand import expand
 from nodes.parse import parse
 from nodes.next_occurrence import next_occurrence
+from nodes import _recur
 from nodes.testkit import NY, FakeContext, recurrence
 from nodes.validate import validate
 
@@ -57,23 +58,25 @@ def timed(fn):
 @pytest.mark.parametrize(
     "rule",
     [
-        # February has no 30th, so none of these ever produce an occurrence.
+        # February has no 30th, April no 31st: these can never occur, and the
+        # expander would only discover that by scanning to the year ceiling.
         "FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30",
         f"FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30;BYSECOND={SECONDS};BYMINUTE={MINUTES}",
         "FREQ=MINUTELY;BYMONTH=2;BYMONTHDAY=30",
         "FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30",
         "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30",
+        "FREQ=YEARLY;BYMONTH=4;BYMONTHDAY=31",
         f"FREQ=SECONDLY;BYMONTH=2;BYMONTHDAY=30;BYSECOND={SECONDS};"
         f"BYMINUTE={MINUTES};BYHOUR={HOURS};BYSETPOS=-1",
     ],
 )
-def test_a_rule_that_never_matches_is_bounded(rule):
-    """The guarantee is termination, not a particular verdict.
+def test_an_impossible_month_day_pair_is_refused_immediately(rule):
+    """Refuse what cannot happen, rather than spending seconds proving it.
 
-    A rule matching nothing has a truthful answer -- zero occurrences -- and
-    returning it is better than erroring. What must never happen is running on
-    unbounded, so either outcome is acceptable provided it arrives promptly:
-    a count of 0, or LIMIT_EXCEEDED when the search costs more than the budget.
+    These are the rules that forced the whole isolation design: they yield
+    nothing, so no budget counted over results can see them. A calendar fact --
+    February never has a 30th -- settles them up front, deterministically, and
+    tells the caller what is actually wrong with their rule.
     """
     result, elapsed = timed(
         lambda: count(
@@ -81,16 +84,37 @@ def test_a_rule_that_never_matches_is_bounded(rule):
             CountRequest(recurrence=recurrence(rule, "00010101T000000"), limit=1),
         )
     )
+    assert result.error.code == "INVALID_RULE", result
+    assert "can never occur" in result.error.message
+    assert elapsed < 1.0, f"took {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        # Rare but genuinely possible, so they must NOT be refused: yearday 366
+        # exists in leap years, week 53 in long years, Feb 29 every four years.
+        "FREQ=SECONDLY;BYYEARDAY=366;BYHOUR=3",
+        "FREQ=SECONDLY;BYMONTH=2;BYMONTHDAY=29;BYHOUR=1;BYMINUTE=1;BYSECOND=1",
+        "FREQ=YEARLY;BYWEEKNO=53",
+    ],
+)
+def test_rare_but_possible_rules_are_answered_not_refused(rule):
+    """The feasibility check must not over-reach into merely-infrequent rules."""
+    result, elapsed = timed(
+        lambda: count(
+            FakeContext(),
+            CountRequest(recurrence=recurrence(rule, "20200101T000000"), limit=1),
+        )
+    )
+    assert result.error.code == "", result.error.message
     assert elapsed < CEILING, f"took {elapsed:.1f}s"
-    if result.error.code:
-        assert result.error.code == "LIMIT_EXCEEDED", result
-    else:
-        assert result.count == 0, result
 
 
 def test_the_never_matching_rule_is_bounded_on_every_expansion_node():
     rule = f"FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30;BYSECOND={SECONDS};BYMINUTE={MINUTES}"
     rec = recurrence(rule, "00010101T000000")
+    expected = "INVALID_RULE"
     calls = [
         lambda: expand(FakeContext(), ExpandRequest(recurrence=rec, limit=1)),
         lambda: between(
@@ -108,7 +132,7 @@ def test_the_never_matching_rule_is_bounded_on_every_expansion_node():
     ]
     for call in calls:
         result, elapsed = timed(call)
-        assert result.error.code == "LIMIT_EXCEEDED", result
+        assert result.error.code == expected, result
         assert elapsed < CEILING, f"took {elapsed:.1f}s"
 
 
@@ -452,3 +476,42 @@ def test_oversized_repeated_fields_are_refused_before_being_built():
     result = build(FakeContext(), RuleParts(freq="DAILY", bysetpos=[1] * 100000))
     assert result.error.code == "LIMIT_EXCEEDED"
     assert "100000 entries" in result.error.message
+
+
+# --- The wall-clock backstop, which nothing previously exercised -----------
+
+def test_the_wall_clock_backstop_actually_fires(monkeypatch):
+    """The backstop was the least-tested bound and the most-claimed one.
+
+    It cannot be triggered by any real input any more -- the deterministic scan
+    budget and the feasibility check reach every case first, which is the point
+    -- so it is exercised by shrinking the deadline instead. Otherwise the
+    package's most emphasised safety mechanism would be entirely unverified.
+    """
+    monkeypatch.setattr(_recur, "SCAN_TIMEOUT_SECONDS", 0.05)
+    result, elapsed = timed(
+        lambda: expand(
+            FakeContext(),
+            ExpandRequest(
+                recurrence=recurrence(SPARSE_RULES[0], "20200101T000000"), limit=10000
+            ),
+        )
+    )
+    assert result.error.code == "LIMIT_EXCEEDED", result
+    assert "did not finish expanding" in result.error.message
+    assert elapsed < 2.0, f"the deadline did not stop it: {elapsed:.1f}s"
+
+
+def test_the_backstop_leaves_no_child_behind(monkeypatch):
+    """A killed worker must be reaped, or repeated timeouts exhaust the host."""
+    import multiprocessing
+
+    monkeypatch.setattr(_recur, "SCAN_TIMEOUT_SECONDS", 0.05)
+    for _ in range(5):
+        expand(
+            FakeContext(),
+            ExpandRequest(
+                recurrence=recurrence(SPARSE_RULES[0], "20200101T000000"), limit=10000
+            ),
+        )
+    assert multiprocessing.active_children() == []

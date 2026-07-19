@@ -26,10 +26,24 @@ def test_zero_and_empty_fields_are_treated_as_omitted():
 
 
 def test_round_trips_with_parse():
+    # BY* lists come back de-duplicated and ordered, so the round trip lands on
+    # the CANONICAL spelling rather than the caller's -- which is the point: two
+    # spellings of one rule must converge on the same text.
     original = "FREQ=MONTHLY;INTERVAL=2;COUNT=10;BYDAY=MO,-1SU;BYMONTHDAY=1,-1;WKST=SU"
+    canonical = "FREQ=MONTHLY;INTERVAL=2;COUNT=10;BYDAY=MO,-1SU;BYMONTHDAY=-1,1;WKST=SU"
     parsed = parse(FakeContext(), RuleInput(rrule=original))
     rebuilt = build(FakeContext(), parsed)
-    assert rebuilt.rrule == original
+    assert rebuilt.rrule == canonical
+    # ...and it is a fixed point: building again changes nothing.
+    again = build(FakeContext(), parse(FakeContext(), RuleInput(rrule=rebuilt.rrule)))
+    assert again.rrule == canonical
+
+
+def test_two_spellings_of_one_rule_normalize_identically():
+    a = validate(FakeContext(), RuleInput(rrule="FREQ=DAILY;BYMONTH=3,1,3,1"))
+    b = validate(FakeContext(), RuleInput(rrule="FREQ=DAILY;BYMONTH=1,3"))
+    assert a.valid and b.valid
+    assert a.normalized == b.normalized == "FREQ=DAILY;BYMONTH=1,3"
 
 
 def test_round_trip_output_validates():
@@ -37,9 +51,9 @@ def test_round_trip_output_validates():
     assert validate(FakeContext(), RuleInput(rrule=rebuilt.rrule)).valid is True
 
 
-def test_no_parts_is_rejected():
+def test_no_parts_is_rejected_with_the_same_code_as_every_other_node():
     r = run()
-    assert r.error.code == "INVALID_ARGUMENT" and r.rrule == ""
+    assert r.error.code == "INVALID_RULE" and r.rrule == ""
 
 
 def test_parts_that_would_form_an_invalid_rule_are_rejected():

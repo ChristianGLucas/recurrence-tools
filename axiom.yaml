@@ -5,8 +5,9 @@ description: >-
   Composable RFC 5545 recurrence nodes over a single Recurrence envelope —
   expand a rule into occurrences, query a window, step to the next occurrence,
   test membership, count, and validate, parse, or build the rule itself.
-  Timezone-aware with correct wall-clock behaviour across DST, offline and
-  deterministic, wrapping python-dateutil.
+  Timezone-aware with correct wall-clock behaviour across DST, fully offline,
+  and deterministic for every rule that yields occurrences, wrapping
+  python-dateutil.
 license: MIT
 author: Christian George Lucas
 tags:

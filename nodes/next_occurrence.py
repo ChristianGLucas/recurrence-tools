@@ -2,15 +2,16 @@ from gen.messages_pb2 import NextRequest, Occurrence
 from gen.axiom_context import AxiomContext
 
 from nodes import _recur
-from nodes._recur import RecurError, build, walk
+from nodes._recur import RecurError, build, cmp_key, walk
 
 
 def _compute(ax: AxiomContext, input: NextRequest) -> Occurrence:
     try:
         exp = build(input.recurrence)
         after = exp.instant(input.after, "after") if input.after else None
+        after_key = cmp_key(after) if after is not None else None
         for dt in walk(exp):
-            if after is None or dt > after:
+            if after_key is None or cmp_key(dt) > after_key:
                 return Occurrence(occurrence=exp.format(dt), found=True)
         if exp.budget_exhausted:
             # Unlike a list, a single "next" cannot be returned partially: the

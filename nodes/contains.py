@@ -2,18 +2,19 @@ from gen.messages_pb2 import ContainsRequest, Membership
 from gen.axiom_context import AxiomContext
 
 from nodes import _recur
-from nodes._recur import RecurError, build, walk
+from nodes._recur import RecurError, build, cmp_key, walk
 
 
 def _compute(ax: AxiomContext, input: ContainsRequest) -> Membership:
     try:
         exp = build(input.recurrence)
         candidate = exp.instant(input.candidate, "candidate")
+        key = cmp_key(candidate)
         exhausted = False
         for dt in walk(exp):
-            if dt == candidate:
+            if cmp_key(dt) == key:
                 return Membership(contains=True)
-            if dt > candidate:
+            if cmp_key(dt) > key:
                 break
         else:
             # Reaching the end without passing the candidate means either the

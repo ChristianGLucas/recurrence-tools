@@ -2,7 +2,7 @@ from gen.messages_pb2 import BetweenRequest, OccurrenceList
 from gen.axiom_context import AxiomContext
 
 from nodes import _recur
-from nodes._recur import RecurError, build, effective_limit, walk
+from nodes._recur import RecurError, build, cmp_key, effective_limit, walk
 
 
 def _compute(ax: AxiomContext, input: BetweenRequest) -> OccurrenceList:
@@ -11,7 +11,8 @@ def _compute(ax: AxiomContext, input: BetweenRequest) -> OccurrenceList:
         exp = build(input.recurrence)
         start = exp.instant(input.start, "start")
         end = exp.instant(input.end, "end")
-        if end <= start:
+        start_key, end_key = cmp_key(start), cmp_key(end)
+        if end_key <= start_key:
             raise RecurError(
                 "INVALID_ARGUMENT",
                 f"end '{input.end}' must be strictly after start '{input.start}'",
@@ -20,9 +21,9 @@ def _compute(ax: AxiomContext, input: BetweenRequest) -> OccurrenceList:
         occurrences = []
         truncated = False
         for dt in walk(exp):
-            if dt < start:
+            if cmp_key(dt) < start_key:
                 continue
-            if dt >= end:
+            if cmp_key(dt) >= end_key:
                 break
             if len(occurrences) == limit:
                 truncated = True
