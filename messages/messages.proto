@@ -148,7 +148,9 @@ message RuleParts {
   repeated int32 bysetpos = 13;
   // WKST: the two-letter week-start day; empty when the rule omits it.
   string wkst = 14;
-  // Set when the rule could not be parsed.
+  // Set by Parse when the rule could not be parsed. Ignored on input: Build
+  // reads only the parts above, so Parse's output can be piped straight into
+  // Build without stripping this field.
   Error error = 15;
 }
 
