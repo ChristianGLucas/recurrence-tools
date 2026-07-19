@@ -19,6 +19,17 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
     output straight back in reproduces the canonical rule unchanged.
     """
     try:
+        # Parse's output pipes straight into this node, so an upstream failure
+        # arrives here as a populated `error` and no parts. Re-deriving a
+        # diagnosis from the empty parts would replace Parse's precise reason
+        # ("INTERVAL must be 1 or greater") with a false one ("no rule parts
+        # were supplied"), which is exactly the case a caller most needs the
+        # truth. Propagate it verbatim instead.
+        if input.error.code:
+            return RuleOutput(
+                error={"code": input.error.code, "message": input.error.message}
+            )
+
         parts = []
         if input.freq:
             parts.append(("FREQ", input.freq))

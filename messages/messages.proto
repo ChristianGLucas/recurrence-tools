@@ -143,7 +143,9 @@ message RuleParts {
   repeated int32 byhour = 8;
   // BYMINUTE, 0..59.
   repeated int32 byminute = 9;
-  // BYSECOND, 0..60.
+  // BYSECOND, 0..59. RFC 5545 permits 60 for a leap second, but the underlying
+  // expander rejects it, so this package does too rather than claim support it
+  // does not have.
   repeated int32 bysecond = 10;
   // BYYEARDAY, 1..366 or -366..-1.
   repeated int32 byyearday = 11;

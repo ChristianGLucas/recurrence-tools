@@ -24,7 +24,7 @@ module does three jobs around it, and deliberately nothing more:
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Iterable, Iterator, List, Optional, Tuple
 
 from dateutil.rrule import rrulestr, rruleset
@@ -37,11 +37,47 @@ MAX_DATE_LIST = 1000
 MAX_LIMIT = 10000
 DEFAULT_LIMIT = 100
 
-# The iterator-step ceiling. Occurrences are produced lazily and in ascending
-# order, so a query can be forced to step over an unbounded number of
-# occurrences it will never return (a far-future window, a candidate that is
-# never reached). Capping results alone would not bound that work.
+# The iterator-step ceiling, counted over occurrences the expander YIELDS.
 MAX_STEPS = 200_000
+
+# The scan ceiling, counted over work the expander DOES. These are different
+# numbers and the difference is a denial-of-service:
+#
+#   FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30
+#
+# is a valid rule that matches NOTHING (February has no 30th), so it yields no
+# occurrences at all -- the yield-counting budget above never advances even once
+# -- while the expander grinds hour by hour toward its year-9999 ceiling. Adding
+# BYSECOND and BYMINUTE lists multiplies the cost of every one of those steps.
+# Measured: ~4.5s for five years at one time-of-day combination, ~20s at 25.
+#
+# So the scan is bounded ahead of time instead, by rewriting the rule with an
+# UNTIL the expander cannot run past. The budget is spent in units of
+# "step x time-of-day combination", which is what the work actually costs, and
+# is sized so the worst case stays around a second or two. In reach, that is
+# ~82 years of a DAILY rule, ~575 of WEEKLY, and millennia of MONTHLY/YEARLY --
+# past any real calendar horizon -- while sub-daily rules, where each step is
+# cheap but there are vastly more of them, get correspondingly less.
+#
+# An UNTIL alone is NOT sufficient: with BYWEEKNO present the expander ignores
+# it entirely and scans to its year ceiling regardless, which is one reason the
+# RFC's part/frequency constraints below are enforced rather than assumed.
+MAX_SCAN_WORK = 30_000
+
+# Nominal seconds per step at each frequency, used only to convert a step
+# allowance into an UNTIL instant. Approximate for MONTHLY/YEARLY, which is
+# fine: this sizes a safety ceiling, it does not decide any occurrence.
+FREQ_STEP_SECONDS = {
+    "SECONDLY": 1,
+    "MINUTELY": 60,
+    "HOURLY": 3600,
+    "DAILY": 86_400,
+    "WEEKLY": 604_800,
+    "MONTHLY": 2_678_400,   # 31 days
+    "YEARLY": 31_622_400,   # 366 days
+}
+
+MAX_YEAR = 9999
 
 FREQS = ("SECONDLY", "MINUTELY", "HOURLY", "DAILY", "WEEKLY", "MONTHLY", "YEARLY")
 WEEKDAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
@@ -62,12 +98,27 @@ SILENT_RANGES = {
     "BYWEEKNO": (1, 53, True),
 }
 
+# RFC 5545 3.3.10 part/frequency constraints, quoted by their effect:
+#   "BYWEEKNO ... MUST NOT be used when the FREQ rule part is set to anything
+#    other than YEARLY."
+#   "BYYEARDAY ... MUST NOT be specified when the FREQ rule part is set to
+#    DAILY, WEEKLY, or MONTHLY."
+#   "BYMONTHDAY ... MUST NOT be specified when the FREQ rule part is set to
+#    WEEKLY."
+PART_FREQUENCIES = {
+    "BYWEEKNO": ("YEARLY",),
+    "BYYEARDAY": ("YEARLY", "HOURLY", "MINUTELY", "SECONDLY"),
+    "BYMONTHDAY": ("YEARLY", "MONTHLY", "DAILY", "HOURLY", "MINUTELY", "SECONDLY"),
+}
+
 INT_LIST_PARTS = (
     "BYSECOND", "BYMINUTE", "BYHOUR", "BYMONTHDAY", "BYYEARDAY",
     "BYWEEKNO", "BYMONTH", "BYSETPOS",
 )
 
-_BARE_RECUR = re.compile(r"^[A-Za-z0-9=;,+\-]+$")
+# \Z, not $: in Python `$` also matches just before a single trailing
+# newline, which would let "FREQ=DAILY;COUNT=3\n" through the guard.
+_BARE_RECUR = re.compile(r"\A[A-Za-z0-9=;,+\-]+\Z")
 # RFC 5545: byday = [weeknum] weekday, weeknum = [plus/minus] ordwk,
 # ordwk = 1*2DIGIT ;1 to 53. Two digits max, and the value is range-checked
 # below -- dateutil crashes with an IndexError on an out-of-range ordinal.
@@ -161,6 +212,20 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
         )
 
     freq = next((v.upper() for k, v in parts if k == "FREQ"), "")
+
+    # RFC 5545 3.3.10 forbids certain BY* parts at certain frequencies. dateutil
+    # accepts them all, and some combinations are actively dangerous: BYWEEKNO on
+    # a sub-yearly frequency defeats even an explicit UNTIL, leaving the expander
+    # scanning toward its year ceiling with no way to stop it. Enforcing the
+    # spec's own constraints is both correct and what makes the scan bounded.
+    for part, allowed in PART_FREQUENCIES.items():
+        if part in keys and freq not in allowed:
+            raise _err(
+                "INVALID_RULE",
+                f"{part} must not be used with FREQ={freq}; "
+                f"RFC 5545 allows it only with {', '.join(allowed)}",
+            )
+
     for key, value in parts:
         _check_part(key, value, freq)
     return parts
@@ -314,7 +379,13 @@ def _canonical_value(key: str, value: str) -> str:
     if key in ("FREQ", "WKST"):
         return value.upper()
     if key == "BYDAY":
-        return ",".join(item.upper() for item in value.split(","))
+        # Strip a redundant leading '+' so "+1MO" and "1MO" -- the same rule --
+        # normalize identically. INT_LIST_PARTS already does this via int();
+        # leaving BYDAY out made `normalized` unusable as an equality key.
+        return ",".join(
+            (item[1:] if item.startswith("+") else item).upper()
+            for item in value.split(",")
+        )
     if key in INT_LIST_PARTS:
         return ",".join(str(int(item)) for item in value.split(","))
     if key in ("INTERVAL", "COUNT"):
@@ -325,6 +396,22 @@ def _canonical_value(key: str, value: str) -> str:
 # --------------------------------------------------------------------------
 # Instants
 # --------------------------------------------------------------------------
+
+def _fmt(dt: datetime, with_time: bool = True, utc_suffix: bool = False) -> str:
+    """Format an instant in RFC 5545 form with an explicitly padded year.
+
+    strftime("%Y") does not zero-pad years below 1000 on Linux, turning year 1
+    into "1" and producing "10101T130000" -- which is not a valid RFC 5545
+    instant and which dateutil rejects. Every instant this package emits goes
+    through here so an early-year anchor round-trips like any other.
+    """
+    text = f"{dt.year:04d}{dt.month:02d}{dt.day:02d}"
+    if with_time:
+        text += f"T{dt.hour:02d}{dt.minute:02d}{dt.second:02d}"
+        if utc_suffix:
+            text += "Z"
+    return text
+
 
 def parse_instant(value: str, field: str) -> Tuple[datetime, str]:
     """Parse an RFC 5545 DATE or DATE-TIME into a naive datetime plus its form."""
@@ -418,26 +505,100 @@ def coerce(value: str, field: str, zone: Optional[tzinfo],
 def format_instant(dt: datetime, kind: str, zone: Optional[tzinfo]) -> str:
     """Emit an occurrence in the same RFC 5545 form as the anchor."""
     if kind == KIND_DATE:
-        return dt.strftime("%Y%m%d")
+        return _fmt(dt, with_time=False)
     if kind == KIND_UTC:
         aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
-        return aware.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return _fmt(aware.astimezone(timezone.utc), utc_suffix=True)
     # Floating, or local to tzid: emit wall-clock time, which is what the
     # TZID form means. The zone travels separately, in Recurrence.tzid.
-    return dt.strftime("%Y%m%dT%H%M%S")
+    return _fmt(dt)
 
 
 # --------------------------------------------------------------------------
 # Recurrence set
 # --------------------------------------------------------------------------
 
-class Expansion:
-    """A parsed recurrence, ready to be walked under a step budget."""
+def _scan_horizon(dtstart: datetime, parts: List[Tuple[str, str]]) -> Tuple[datetime, int]:
+    """Pick the instant past which the expander is not allowed to scan.
 
-    def __init__(self, rset: rruleset, kind: str, zone: Optional[tzinfo]):
+    The allowance shrinks as each step gets more expensive, so the product --
+    the real cost -- stays inside MAX_SCAN_WORK however the rule is shaped.
+    """
+    by = {k: v for k, v in parts}
+    freq = by.get("FREQ", "DAILY").upper()
+    interval = max(1, int(by.get("INTERVAL", "1")))
+
+    # Every step materializes one time-of-day per combination of these.
+    combos = 1
+    for part in ("BYSECOND", "BYMINUTE", "BYHOUR"):
+        if part in by:
+            combos *= max(1, len(by[part].split(",")))
+
+    steps = max(1, MAX_SCAN_WORK // combos)
+    span = steps * interval * FREQ_STEP_SECONDS.get(freq, 86_400)
+    try:
+        return dtstart + timedelta(seconds=span), steps
+    except OverflowError:
+        return dtstart.replace(year=MAX_YEAR, month=12, day=31), steps
+
+
+def _rule_with_horizon(parts: List[Tuple[str, str]], horizon: datetime,
+                       zone: Optional[tzinfo]) -> Tuple[str, Optional[int], bool]:
+    """Rewrite a rule so the expander stops at `horizon`.
+
+    Returns the rewritten rule, the COUNT this package must now enforce itself,
+    and whether the horizon actually cut the rule short.
+
+    COUNT is stripped rather than kept: RFC 5545 forbids COUNT and UNTIL in one
+    rule, and a COUNT rule that matches rarely would otherwise scan forever
+    hunting for its Nth occurrence. Counting here instead preserves the exact
+    semantics -- the first N occurrences -- under a bounded scan.
+    """
+    by = {k: v for k, v in parts}
+    count = int(by["COUNT"]) if "COUNT" in by else None
+
+    existing = by.get("UNTIL")
+    capped = True
+    if existing is not None:
+        until_dt, until_kind = parse_instant(existing, "UNTIL")
+        if until_kind == KIND_UTC and zone is not None:
+            until_dt = until_dt.replace(tzinfo=timezone.utc).astimezone(
+                zone).replace(tzinfo=None)
+        if until_dt <= horizon.replace(tzinfo=None):
+            # The rule already ends before the ceiling, so nothing is truncated.
+            return canonical_rule(parts), count, False
+
+    naive_horizon = horizon.replace(tzinfo=None)
+    if zone is not None:
+        # RFC 5545 3.3.10 and dateutil both require UNTIL in UTC once the anchor
+        # carries a zone, so the ceiling is converted rather than passed through.
+        until_text = _fmt(
+            naive_horizon.replace(tzinfo=zone).astimezone(timezone.utc),
+            utc_suffix=True,
+        )
+    else:
+        until_text = _fmt(naive_horizon)
+
+    kept = [(k, v) for k, v in parts if k not in ("COUNT", "UNTIL")]
+    kept.append(("UNTIL", until_text))
+    return canonical_rule(kept), count, capped
+
+
+class Expansion:
+    """A parsed recurrence, ready to be walked under a bounded scan."""
+
+    def __init__(self, rset: rruleset, kind: str, zone: Optional[tzinfo],
+                 count: Optional[int] = None, capped: bool = False,
+                 horizon: Optional[datetime] = None):
         self.rset = rset
         self.kind = kind
         self.zone = zone
+        # COUNT lifted out of the rule, now enforced during the walk.
+        self.count = count
+        # True when the scan ceiling cut the rule short, so running out of
+        # occurrences means "stopped early", not "genuinely exhausted".
+        self.capped = capped
+        self.horizon = horizon
 
     def format(self, dt: datetime) -> str:
         return format_instant(dt, self.kind, self.zone)
@@ -451,7 +612,7 @@ def build(recurrence) -> Expansion:
     if recurrence is None:
         raise _err("INVALID_ARGUMENT", "recurrence is required")
 
-    check_rule(recurrence.rrule)
+    parts = check_rule(recurrence.rrule)
 
     if len(recurrence.rdate) > MAX_DATE_LIST:
         raise _err(
@@ -468,20 +629,41 @@ def build(recurrence) -> Expansion:
     zone = zone_for(kind, recurrence.tzid)
     dtstart = localize(dt, zone)
 
+    horizon, _ = _scan_horizon(dt, parts)
+    bounded_rule, count, capped = _rule_with_horizon(parts, horizon, zone)
+
     try:
-        rule = rrulestr(recurrence.rrule, dtstart=dtstart, cache=False)
+        rule = rrulestr(bounded_rule, dtstart=dtstart, cache=False)
     except RecurError:
         raise
     except Exception as exc:
         raise _err("INVALID_RULE", f"rrule could not be parsed: {exc}")
 
     rset = rruleset(cache=False)
-    rset.rrule(rule)
+    if count is None:
+        rset.rrule(rule)
+    else:
+        # COUNT bounds the RRULE's OWN occurrences; RDATEs are added on top and
+        # EXDATEs removed afterwards (RFC 5545 3.8.5.3). Applying it to the
+        # merged stream instead would let an RDATE consume the rule's quota and
+        # let an EXDATE be silently backfilled. Since COUNT had to be lifted out
+        # of the rule to bound the scan, the rule's own occurrences are
+        # materialized here -- at most MAX_LIMIT of them -- and re-added as
+        # explicit dates, which keeps the ordering the RFC specifies.
+        satisfied = False
+        for occurrence in rule:
+            rset.rdate(occurrence)
+            count -= 1
+            if count == 0:
+                satisfied = True
+                break
+        capped = capped and not satisfied
+    count = None  # fully applied above; the walk must not re-apply it
     for value in recurrence.rdate:
         rset.rdate(coerce(value, "rdate", zone, kind))
     for value in recurrence.exdate:
         rset.exdate(coerce(value, "exdate", zone, kind))
-    return Expansion(rset, kind, zone)
+    return Expansion(rset, kind, zone, count=count, capped=capped, horizon=horizon)
 
 
 def walk(exp: Expansion, budget: int = MAX_STEPS) -> Iterator[datetime]:
@@ -492,8 +674,12 @@ def walk(exp: Expansion, budget: int = MAX_STEPS) -> Iterator[datetime]:
     terminate instead of running away.
     """
     steps = 0
+    yielded = 0
     iterator = iter(exp.rset)
     while True:
+        if exp.count is not None and yielded >= exp.count:
+            # The rule's own COUNT, lifted out so the scan could be bounded.
+            return
         # Failures inside the expander surface HERE, on iteration, not when the
         # rule was constructed -- so no amount of up-front rule checking can be
         # relied on to have caught them. Anything that escapes becomes a
@@ -503,6 +689,16 @@ def walk(exp: Expansion, budget: int = MAX_STEPS) -> Iterator[datetime]:
         try:
             dt = next(iterator)
         except StopIteration:
+            if exp.capped:
+                # The expander did not run out of occurrences -- it ran into the
+                # scan ceiling. Returning "no more" here would be a wrong answer
+                # dressed as an empty one, so it is reported instead.
+                raise _err(
+                    "LIMIT_EXCEEDED",
+                    "the recurrence was scanned as far as "
+                    f"{_fmt(exp.horizon)} without satisfying this "
+                    "request; narrow the rule, window, or limit",
+                )
             return
         except RecurError:
             raise
@@ -513,6 +709,7 @@ def walk(exp: Expansion, budget: int = MAX_STEPS) -> Iterator[datetime]:
                 f"{type(exc).__name__}: {exc}",
             )
         steps += 1
+        yielded += 1
         if steps > budget:
             raise _err(
                 "LIMIT_EXCEEDED",
@@ -520,6 +717,93 @@ def walk(exp: Expansion, budget: int = MAX_STEPS) -> Iterator[datetime]:
                 "satisfying this request; narrow the rule, window, or limit",
             )
         yield dt
+
+
+# --------------------------------------------------------------------------
+# Isolation
+# --------------------------------------------------------------------------
+
+# The wall-clock ceiling for one expansion, enforced in a separate process.
+SCAN_TIMEOUT_SECONDS = 5.0
+
+
+def _isolated_entry(module_name: str, data: bytes, queue) -> None:
+    import importlib
+
+    try:
+        queue.put(("ok", importlib.import_module(module_name).compute(data)))
+    except RecurError as exc:
+        queue.put(("err", exc.code, exc.message))
+    except Exception as exc:  # pragma: no cover - defence in depth
+        queue.put(("err", "INVALID_RULE", f"{type(exc).__name__}: {exc}"))
+
+
+def isolate(module_name: str, input_msg):
+    """Run a node's computation in a process that can be killed.
+
+    The scan ceiling and the step budget bound the cases that can be bounded
+    from the outside, but they cannot bound all of them. A rule that matches
+    NOTHING never yields, so a yield-counting budget never advances; and the
+    expander does not reliably honour the UNTIL used to cap its scan -- with
+    certain part combinations it keeps going regardless. The hang then happens
+    inside a single call into the library, where no deadline this code could
+    check would ever be reached.
+
+    Some failures can only be prevented, not caught. So the work runs in a
+    child process with a hard wall-clock limit: if it overruns, the process is
+    killed and the caller gets a structured LIMIT_EXCEEDED, with no runaway
+    left behind burning CPU.
+
+    Returns (serialized_output, None) on success, or (None, error_dict). The
+    caller constructs its own output message from that -- both because the
+    error has to be attached to the node's own type, and because `axiom
+    validate` requires a node body to visibly construct its declared output.
+    """
+    import multiprocessing
+
+    try:
+        ctx = multiprocessing.get_context("fork")
+    except ValueError:  # pragma: no cover - platform without fork
+        import importlib
+
+        return importlib.import_module(module_name).compute(
+            input_msg.SerializeToString()
+        ), None
+
+    queue = ctx.Queue(1)
+    proc = ctx.Process(
+        target=_isolated_entry,
+        args=(module_name, input_msg.SerializeToString(), queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(SCAN_TIMEOUT_SECONDS)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(1.0)
+        if proc.is_alive():  # pragma: no cover - terminate is reliable here
+            proc.kill()
+            proc.join(1.0)
+        return None, {
+            "code": "LIMIT_EXCEEDED",
+            "message": (
+                f"the recurrence did not finish expanding within "
+                f"{SCAN_TIMEOUT_SECONDS:.0f}s; it is too costly to evaluate. "
+                "Narrow the rule, window, or limit"
+            ),
+        }
+
+    if queue.empty():  # pragma: no cover - child died without reporting
+        return None, {
+            "code": "LIMIT_EXCEEDED",
+            "message": "the recurrence could not be expanded within its budget",
+        }
+
+    result = queue.get()
+    if result[0] == "err":
+        return None, {"code": result[1], "message": result[2]}
+    return result[1], None
 
 
 def effective_limit(limit: int, default: int = DEFAULT_LIMIT) -> int:
