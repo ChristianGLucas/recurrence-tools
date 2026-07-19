@@ -84,6 +84,14 @@ summer. That is the behaviour `tzid` buys you.
 
 `Parse` and `Build` are inverses: feeding `Parse`'s output straight into `Build`
 reproduces the canonical rule, and `Build` never emits a rule `Validate` rejects.
+That edge needs no adapter at all — both sides are `RuleParts` — and it stays
+honest on the error path: `Build` propagates `Parse`'s diagnosis rather than
+re-deriving one from the empty parts it received.
+
+**What chains onward.** `Build` → `Validate`/`Parse` (a rule string),
+`Parse` → `Build` (parts), and `NextOccurrence` → any node taking an instant.
+`Expand`, `Between`, and `Count` are terminal: no node in this package consumes
+a list of occurrences, so they sit at the end of a graph.
 
 ## Strictness
 
