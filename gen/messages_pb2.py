@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0emessages.proto\x12%christiangeorgelucas.recurrence_tools\"&\n\x05\x45rror\x12\x0c\n\x04\x63ode\x18\x01 \x01(\t\x12\x0f\n\x07message\x18\x02 \x01(\t\"Y\n\nRecurrence\x12\r\n\x05rrule\x18\x01 \x01(\t\x12\x0f\n\x07\x64tstart\x18\x02 \x01(\t\x12\x0c\n\x04tzid\x18\x03 \x01(\t\x12\r\n\x05rdate\x18\x04 \x03(\t\x12\x0e\n\x06\x65xdate\x18\x05 \x03(\t\"e\n\rExpandRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\r\n\x05limit\x18\x02 \x01(\x05\"\x82\x01\n\x0e\x42\x65tweenRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\r\n\x05start\x18\x02 \x01(\t\x12\x0b\n\x03\x65nd\x18\x03 \x01(\t\x12\r\n\x05limit\x18\x04 \x01(\x05\"c\n\x0bNextRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\r\n\x05\x61\x66ter\x18\x02 \x01(\t\"k\n\x0f\x43ontainsRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\x11\n\tcandidate\x18\x02 \x01(\t\"d\n\x0c\x43ountRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\r\n\x05limit\x18\x02 \x01(\x05\"\x1a\n\tRuleInput\x12\r\n\x05rrule\x18\x01 \x01(\t\"X\n\nRuleOutput\x12\r\n\x05rrule\x18\x01 \x01(\t\x12;\n\x05\x65rror\x18\x02 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"\xb3\x02\n\tRuleParts\x12\x0c\n\x04\x66req\x18\x01 \x01(\t\x12\x10\n\x08interval\x18\x02 \x01(\x05\x12\r\n\x05\x63ount\x18\x03 \x01(\x05\x12\r\n\x05until\x18\x04 \x01(\t\x12\r\n\x05\x62yday\x18\x05 \x03(\t\x12\x12\n\nbymonthday\x18\x06 \x03(\x05\x12\x0f\n\x07\x62ymonth\x18\x07 \x03(\x05\x12\x0e\n\x06\x62yhour\x18\x08 \x03(\x05\x12\x10\n\x08\x62yminute\x18\t \x03(\x05\x12\x10\n\x08\x62ysecond\x18\n \x03(\x05\x12\x11\n\tbyyearday\x18\x0b \x03(\x05\x12\x10\n\x08\x62yweekno\x18\x0c \x03(\x05\x12\x10\n\x08\x62ysetpos\x18\r \x03(\x05\x12\x0c\n\x04wkst\x18\x0e \x01(\t\x12;\n\x05\x65rror\x18\x0f \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"r\n\x10ValidationResult\x12\r\n\x05valid\x18\x01 \x01(\x08\x12\x12\n\nnormalized\x18\x02 \x01(\t\x12;\n\x05\x65rror\x18\x03 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"\x84\x01\n\x0eOccurrenceList\x12\x13\n\x0boccurrences\x18\x01 \x03(\t\x12\r\n\x05\x63ount\x18\x02 \x01(\x05\x12\x11\n\ttruncated\x18\x03 \x01(\x08\x12;\n\x05\x65rror\x18\x04 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"l\n\nOccurrence\x12\x12\n\noccurrence\x18\x01 \x01(\t\x12\r\n\x05\x66ound\x18\x02 \x01(\x08\x12;\n\x05\x65rror\x18\x03 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"[\n\nMembership\x12\x10\n\x08\x63ontains\x18\x01 \x01(\x08\x12;\n\x05\x65rror\x18\x02 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"p\n\x0fOccurrenceCount\x12\r\n\x05\x63ount\x18\x01 \x01(\x05\x12\x11\n\ttruncated\x18\x02 \x01(\x08\x12;\n\x05\x65rror\x18\x03 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.ErrorB\x0f\n\x03genB\x08Messagesb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0emessages.proto\x12%christiangeorgelucas.recurrence_tools\"&\n\x05\x45rror\x12\x0c\n\x04\x63ode\x18\x01 \x01(\t\x12\x0f\n\x07message\x18\x02 \x01(\t\"\x96\x01\n\nRecurrence\x12\r\n\x05rrule\x18\x01 \x01(\t\x12\x0f\n\x07\x64tstart\x18\x02 \x01(\t\x12\x0c\n\x04tzid\x18\x03 \x01(\t\x12\r\n\x05rdate\x18\x04 \x03(\t\x12\x0e\n\x06\x65xdate\x18\x05 \x03(\t\x12;\n\x05\x65rror\x18\x06 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"e\n\rExpandRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\r\n\x05limit\x18\x02 \x01(\x05\"\x82\x01\n\x0e\x42\x65tweenRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\r\n\x05start\x18\x02 \x01(\t\x12\x0b\n\x03\x65nd\x18\x03 \x01(\t\x12\r\n\x05limit\x18\x04 \x01(\x05\"c\n\x0bNextRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\r\n\x05\x61\x66ter\x18\x02 \x01(\t\"k\n\x0f\x43ontainsRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\x11\n\tcandidate\x18\x02 \x01(\t\"d\n\x0c\x43ountRequest\x12\x45\n\nrecurrence\x18\x01 \x01(\x0b\x32\x31.christiangeorgelucas.recurrence_tools.Recurrence\x12\r\n\x05limit\x18\x02 \x01(\x05\"W\n\tRuleInput\x12\r\n\x05rrule\x18\x01 \x01(\t\x12;\n\x05\x65rror\x18\x02 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"X\n\nRuleOutput\x12\r\n\x05rrule\x18\x01 \x01(\t\x12;\n\x05\x65rror\x18\x02 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"\xb3\x02\n\tRuleParts\x12\x0c\n\x04\x66req\x18\x01 \x01(\t\x12\x10\n\x08interval\x18\x02 \x01(\x05\x12\r\n\x05\x63ount\x18\x03 \x01(\x05\x12\r\n\x05until\x18\x04 \x01(\t\x12\r\n\x05\x62yday\x18\x05 \x03(\t\x12\x12\n\nbymonthday\x18\x06 \x03(\x05\x12\x0f\n\x07\x62ymonth\x18\x07 \x03(\x05\x12\x0e\n\x06\x62yhour\x18\x08 \x03(\x05\x12\x10\n\x08\x62yminute\x18\t \x03(\x05\x12\x10\n\x08\x62ysecond\x18\n \x03(\x05\x12\x11\n\tbyyearday\x18\x0b \x03(\x05\x12\x10\n\x08\x62yweekno\x18\x0c \x03(\x05\x12\x10\n\x08\x62ysetpos\x18\r \x03(\x05\x12\x0c\n\x04wkst\x18\x0e \x01(\t\x12;\n\x05\x65rror\x18\x0f \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"r\n\x10ValidationResult\x12\r\n\x05valid\x18\x01 \x01(\x08\x12\x12\n\nnormalized\x18\x02 \x01(\t\x12;\n\x05\x65rror\x18\x03 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"\x84\x01\n\x0eOccurrenceList\x12\x13\n\x0boccurrences\x18\x01 \x03(\t\x12\r\n\x05\x63ount\x18\x02 \x01(\x05\x12\x11\n\ttruncated\x18\x03 \x01(\x08\x12;\n\x05\x65rror\x18\x04 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"l\n\nOccurrence\x12\x12\n\noccurrence\x18\x01 \x01(\t\x12\r\n\x05\x66ound\x18\x02 \x01(\x08\x12;\n\x05\x65rror\x18\x03 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"[\n\nMembership\x12\x10\n\x08\x63ontains\x18\x01 \x01(\x08\x12;\n\x05\x65rror\x18\x02 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.Error\"p\n\x0fOccurrenceCount\x12\r\n\x05\x63ount\x18\x01 \x01(\x05\x12\x11\n\ttruncated\x18\x02 \x01(\x08\x12;\n\x05\x65rror\x18\x03 \x01(\x0b\x32,.christiangeorgelucas.recurrence_tools.ErrorB\x0f\n\x03genB\x08Messagesb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,32 +34,32 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\003genB\010Messages'
   _globals['_ERROR']._serialized_start=57
   _globals['_ERROR']._serialized_end=95
-  _globals['_RECURRENCE']._serialized_start=97
-  _globals['_RECURRENCE']._serialized_end=186
-  _globals['_EXPANDREQUEST']._serialized_start=188
-  _globals['_EXPANDREQUEST']._serialized_end=289
-  _globals['_BETWEENREQUEST']._serialized_start=292
-  _globals['_BETWEENREQUEST']._serialized_end=422
-  _globals['_NEXTREQUEST']._serialized_start=424
-  _globals['_NEXTREQUEST']._serialized_end=523
-  _globals['_CONTAINSREQUEST']._serialized_start=525
-  _globals['_CONTAINSREQUEST']._serialized_end=632
-  _globals['_COUNTREQUEST']._serialized_start=634
-  _globals['_COUNTREQUEST']._serialized_end=734
-  _globals['_RULEINPUT']._serialized_start=736
-  _globals['_RULEINPUT']._serialized_end=762
-  _globals['_RULEOUTPUT']._serialized_start=764
-  _globals['_RULEOUTPUT']._serialized_end=852
-  _globals['_RULEPARTS']._serialized_start=855
-  _globals['_RULEPARTS']._serialized_end=1162
-  _globals['_VALIDATIONRESULT']._serialized_start=1164
-  _globals['_VALIDATIONRESULT']._serialized_end=1278
-  _globals['_OCCURRENCELIST']._serialized_start=1281
-  _globals['_OCCURRENCELIST']._serialized_end=1413
-  _globals['_OCCURRENCE']._serialized_start=1415
-  _globals['_OCCURRENCE']._serialized_end=1523
-  _globals['_MEMBERSHIP']._serialized_start=1525
-  _globals['_MEMBERSHIP']._serialized_end=1616
-  _globals['_OCCURRENCECOUNT']._serialized_start=1618
-  _globals['_OCCURRENCECOUNT']._serialized_end=1730
+  _globals['_RECURRENCE']._serialized_start=98
+  _globals['_RECURRENCE']._serialized_end=248
+  _globals['_EXPANDREQUEST']._serialized_start=250
+  _globals['_EXPANDREQUEST']._serialized_end=351
+  _globals['_BETWEENREQUEST']._serialized_start=354
+  _globals['_BETWEENREQUEST']._serialized_end=484
+  _globals['_NEXTREQUEST']._serialized_start=486
+  _globals['_NEXTREQUEST']._serialized_end=585
+  _globals['_CONTAINSREQUEST']._serialized_start=587
+  _globals['_CONTAINSREQUEST']._serialized_end=694
+  _globals['_COUNTREQUEST']._serialized_start=696
+  _globals['_COUNTREQUEST']._serialized_end=796
+  _globals['_RULEINPUT']._serialized_start=798
+  _globals['_RULEINPUT']._serialized_end=885
+  _globals['_RULEOUTPUT']._serialized_start=887
+  _globals['_RULEOUTPUT']._serialized_end=975
+  _globals['_RULEPARTS']._serialized_start=978
+  _globals['_RULEPARTS']._serialized_end=1285
+  _globals['_VALIDATIONRESULT']._serialized_start=1287
+  _globals['_VALIDATIONRESULT']._serialized_end=1401
+  _globals['_OCCURRENCELIST']._serialized_start=1404
+  _globals['_OCCURRENCELIST']._serialized_end=1536
+  _globals['_OCCURRENCE']._serialized_start=1538
+  _globals['_OCCURRENCE']._serialized_end=1646
+  _globals['_MEMBERSHIP']._serialized_start=1648
+  _globals['_MEMBERSHIP']._serialized_end=1739
+  _globals['_OCCURRENCECOUNT']._serialized_start=1741
+  _globals['_OCCURRENCECOUNT']._serialized_end=1853
 # @@protoc_insertion_point(module_scope)

@@ -64,6 +64,12 @@ message Recurrence {
   // RFC 5545 EXDATE values: occurrences removed from the recurrence set. An
   // EXDATE that matches no occurrence is ignored, per RFC 5545. Max 1000 entries.
   repeated string exdate = 5;
+  // An error carried in from an upstream node. When set, every node consuming
+  // this envelope propagates it verbatim and does no work, so a flow reports
+  // the mistake that actually happened instead of re-deriving a confident wrong
+  // one from the empty fields that accompany it. A flow author wires an
+  // upstream `error` here; a direct caller leaves it unset.
+  Error error = 6;
 }
 
 // Ask for the first `limit` occurrences of a recurrence.
@@ -117,6 +123,9 @@ message CountRequest {
 message RuleInput {
   // The RRULE property value, with no "RRULE:" prefix. Max 2048 characters.
   string rrule = 1;
+  // An error carried in from an upstream node; propagated verbatim when set.
+  // See Recurrence.error.
+  Error error = 2;
 }
 
 // A generated RFC 5545 RECUR value.
@@ -139,7 +148,11 @@ message RuleParts {
   int32 count = 3;
   // UNTIL as an RFC 5545 instant; empty when the rule omits it.
   string until = 4;
-  // BYDAY, e.g. ["MO","-1SU"].
+  // BYDAY, e.g. ["MO","-1SU"]. A numeric prefix requires FREQ=MONTHLY or
+  // YEARLY. Its range is narrowed below what the RFC grammar allows (1..53) to
+  // what the frequency can actually produce -- 1..5 for MONTHLY, since a month
+  // holds at most five of any weekday -- because the underlying expander
+  // crashes rather than returning an empty set past that point.
   repeated string byday = 5;
   // BYMONTHDAY, 1..31 or -31..-1.
   repeated int32 bymonthday = 6;
@@ -184,8 +197,12 @@ message OccurrenceList {
   repeated string occurrences = 1;
   // The number of entries in `occurrences`.
   int32 count = 2;
-  // True when the recurrence had more occurrences than the effective limit,
-  // meaning `occurrences` was cut short rather than exhausted.
+  // True when `occurrences` was cut short rather than exhausted: either the
+  // effective limit was reached, or the scan budget was. Both mean more
+  // occurrences exist; the ones returned are correct either way.
+  //
+  // A recurrence running past the end of the representable calendar (year 9999)
+  // simply stops there, with `truncated` false -- there is nothing beyond it.
   bool truncated = 3;
   // Set when the request could not be served.
   Error error = 4;
@@ -213,8 +230,9 @@ message Membership {
 message OccurrenceCount {
   // The number of occurrences, capped at the effective limit.
   int32 count = 1;
-  // True when the recurrence produces more occurrences than the effective
-  // limit, meaning `count` is a floor rather than the exact total.
+  // True when `count` is a floor rather than the exact total: the recurrence
+  // produces more than the effective limit, or the scan budget stopped the
+  // count early.
   bool truncated = 2;
   // Set when the request could not be served.
   Error error = 3;

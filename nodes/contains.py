@@ -9,11 +9,24 @@ def _compute(ax: AxiomContext, input: ContainsRequest) -> Membership:
     try:
         exp = build(input.recurrence)
         candidate = exp.instant(input.candidate, "candidate")
+        exhausted = False
         for dt in walk(exp):
             if dt == candidate:
                 return Membership(contains=True)
             if dt > candidate:
                 break
+        else:
+            # Reaching the end without passing the candidate means either the
+            # recurrence really ended, or the scan stopped early -- and only the
+            # first of those makes "not a member" a true answer.
+            exhausted = exp.budget_exhausted
+        if exhausted:
+            raise RecurError(
+                "LIMIT_EXCEEDED",
+                "the search passed its scan budget before reaching the "
+                "candidate instant; narrow the rule or move the candidate "
+                "closer to the recurrence",
+            )
     except RecurError as exc:
         ax.log.info("contains rejected input", code=exc.code)
         return Membership(error={"code": exc.code, "message": exc.message})

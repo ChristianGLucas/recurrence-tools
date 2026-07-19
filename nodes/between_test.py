@@ -48,11 +48,15 @@ def test_end_equal_to_start_is_rejected():
     assert r.error.code == "INVALID_ARGUMENT"
 
 
-def test_far_future_window_is_bounded_rather_than_hanging():
-    # Without a step budget this walks ~1.9 billion occurrences before the
-    # window is even reached. It must come back as a structured error.
-    r = run("FREQ=SECONDLY", "20260101T000000", "20860101T000000", "20860101T000100")
-    assert r.error.code == "LIMIT_EXCEEDED"
+def test_far_future_window_is_bounded_and_says_so():
+    # Reaching this window means stepping over ~1.9 billion occurrences, so the
+    # scan budget stops first. The answer is an empty list flagged `truncated`,
+    # not an error: nothing was found, and the caller is told the search did not
+    # finish rather than being left to read absence as certainty.
+    result = run("FREQ=SECONDLY", "20260101T000000", "20860101T000000", "20860101T000100")
+    assert result.error.code == ""
+    assert result.count == 0
+    assert result.truncated is True, "an unfinished search must not look exhaustive"
 
 
 def test_mixing_utc_window_with_floating_anchor_is_rejected():

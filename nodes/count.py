@@ -16,6 +16,7 @@ def _compute(ax: AxiomContext, input: CountRequest) -> OccurrenceCount:
                 truncated = True
                 break
             total += 1
+        truncated = truncated or exp.budget_exhausted
     except RecurError as exc:
         ax.log.info("count rejected input", code=exc.code)
         return OccurrenceCount(error={"code": exc.code, "message": exc.message})

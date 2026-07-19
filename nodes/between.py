@@ -28,6 +28,7 @@ def _compute(ax: AxiomContext, input: BetweenRequest) -> OccurrenceList:
                 truncated = True
                 break
             occurrences.append(exp.format(dt))
+        truncated = truncated or exp.budget_exhausted
     except RecurError as exc:
         ax.log.info("between rejected input", code=exc.code)
         return OccurrenceList(error={"code": exc.code, "message": exc.message})

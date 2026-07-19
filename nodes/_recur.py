@@ -40,10 +40,33 @@ DEFAULT_LIMIT = 100
 # The iterator-step ceiling, counted over occurrences the expander YIELDS.
 MAX_STEPS = 200_000
 
-# Bounding COST is the isolated worker's job (see `isolate`). Earlier versions
-# tried to bound it by rewriting the caller's rule with a synthesized UNTIL,
-# which silently changed the answer for sparse rules; a bound that returns the
-# wrong answer is worse than no bound. The rule is now expanded as written.
+# The DETERMINISTIC cost bound, counted in candidate instants the expander has
+# to examine -- which is what the work actually is.
+#
+# A rule's cost is not its result size. "FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;
+# BYSECOND=0" yields one occurrence a day, but the expander steps through every
+# second in between: 86400 candidates per occurrence. Measured, that runs at a
+# steady ~17.4 million candidates/second regardless of frequency, so the
+# candidate count predicts the cost -- and unlike a clock, it is the same number
+# on every machine and every run.
+#
+# It is computed from the occurrences themselves: the calendar distance between
+# consecutive occurrences, divided by the frequency's step. No rule rewriting is
+# involved, so this cannot change any answer -- it only decides when to stop.
+MAX_SCAN_STEPS = 20_000_000
+
+# Nominal seconds per step at each frequency, for converting a calendar span
+# into a candidate count. Approximate for MONTHLY/YEARLY, which is fine: this
+# sizes a budget, it does not decide any occurrence.
+FREQ_STEP_SECONDS = {
+    "SECONDLY": 1,
+    "MINUTELY": 60,
+    "HOURLY": 3600,
+    "DAILY": 86_400,
+    "WEEKLY": 604_800,
+    "MONTHLY": 2_678_400,   # 31 days
+    "YEARLY": 31_622_400,   # 366 days
+}
 
 FREQS = ("SECONDLY", "MINUTELY", "HOURLY", "DAILY", "WEEKLY", "MONTHLY", "YEARLY")
 WEEKDAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
@@ -108,6 +131,20 @@ class RecurError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+# Caller strings are echoed into error messages so a mistake is easy to spot.
+# They are truncated first: an error is a diagnostic, not a mirror, and echoing
+# a 200KB value back would let a caller amplify a tiny request into a huge
+# response for free.
+MAX_ECHO = 80
+
+
+def echo(value: str) -> str:
+    """Render a caller-supplied value for an error message, bounded."""
+    if len(value) <= MAX_ECHO:
+        return value
+    return f"{value[:MAX_ECHO]}... ({len(value)} characters)"
 
 
 def _err(code: str, message: str) -> RecurError:
@@ -396,7 +433,7 @@ def parse_instant(value: str, field: str) -> Tuple[datetime, str]:
 
     raise _err(
         "INVALID_DATETIME",
-        f"{field} '{value}' is not an RFC 5545 DATE ('19970902') or "
+        f"{field} '{echo(value)}' is not an RFC 5545 DATE ('19970902') or "
         f"DATE-TIME ('19970902T090000' / '19970902T090000Z')",
     )
 
@@ -426,7 +463,9 @@ def zone_for(kind: str, tzid: str) -> Optional[tzinfo]:
 
             return ZoneInfo(tzid)
         except Exception:
-            raise _err("INVALID_ARGUMENT", f"unknown IANA time-zone id '{tzid}'")
+            raise _err(
+                "INVALID_ARGUMENT", f"unknown IANA time-zone id '{echo(tzid)}'"
+            )
     return timezone.utc if kind == KIND_UTC else None
 
 
@@ -487,10 +526,18 @@ def format_instant(dt: datetime, kind: str, zone: Optional[tzinfo]) -> str:
 class Expansion:
     """A parsed recurrence, ready to be walked."""
 
-    def __init__(self, rset: rruleset, kind: str, zone: Optional[tzinfo]):
+    def __init__(self, rset: rruleset, kind: str, zone: Optional[tzinfo],
+                 anchor: Optional[datetime] = None, step_seconds: int = 86_400):
         self.rset = rset
         self.kind = kind
         self.zone = zone
+        # Where the scan starts, and how much calendar one candidate covers --
+        # together these turn occurrence gaps into a candidate count.
+        self.anchor = anchor
+        self.step_seconds = max(1, step_seconds)
+        # Set by walk() when the scan budget stopped it. Distinguishes "no more
+        # occurrences" from "stopped counting", which callers report differently.
+        self.budget_exhausted = False
 
     def format(self, dt: datetime) -> str:
         return format_instant(dt, self.kind, self.zone)
@@ -503,6 +550,11 @@ def build(recurrence) -> Expansion:
     """Turn a Recurrence message into a bounded, validated Expansion."""
     if recurrence is None:
         raise _err("INVALID_ARGUMENT", "recurrence is required")
+    if recurrence.error.code:
+        # An upstream node already diagnosed this precisely. Re-deriving from the
+        # empty fields that came with it would replace the real reason with a
+        # wrong one, exactly where a caller most needs the truth.
+        raise _err(recurrence.error.code, recurrence.error.message)
 
     parts = check_rule(recurrence.rrule)
 
@@ -543,17 +595,31 @@ def build(recurrence) -> Expansion:
         rset.rdate(coerce(value, "rdate", zone, kind))
     for value in recurrence.exdate:
         rset.exdate(coerce(value, "exdate", zone, kind))
-    return Expansion(rset, kind, zone)
+    by_part = {k: v for k, v in parts}
+    freq = by_part.get("FREQ", "DAILY").upper()
+    interval = max(1, int(by_part.get("INTERVAL", "1")))
+    step = FREQ_STEP_SECONDS.get(freq, 86_400) * interval
+    return Expansion(rset, kind, zone, anchor=dtstart, step_seconds=step)
 
 
-def walk(exp: Expansion, budget: int = MAX_STEPS) -> Iterator[datetime]:
-    """Yield occurrences in ascending order under a hard step budget.
+def walk(exp: Expansion, budget: int = MAX_STEPS,
+         scan_budget: int = MAX_SCAN_STEPS) -> Iterator[datetime]:
+    """Yield occurrences in ascending order under two deterministic budgets.
 
-    The budget counts occurrences *visited*, including ones a caller discards,
-    which is what makes a far-future window or an unreachable candidate
-    terminate instead of running away.
+    `budget` counts occurrences visited, including ones the caller discards --
+    what stops a far-future window from running away. `scan_budget` counts the
+    candidate instants the expander had to examine to produce them, which is
+    the real cost of a sparse rule and is invisible in the result size.
+
+    Both are counts, so the same request always stops at the same place on any
+    machine. Exhausting either sets `budget_exhausted` and ends the walk rather
+    than raising: a partial list of real occurrences is a better answer than an
+    error, and each node decides how to report it.
     """
     steps = 0
+    scanned = 0.0
+    previous = exp.anchor
+    exp.budget_exhausted = False
     iterator = iter(exp.rset)
     while True:
         # Failures inside the expander surface HERE, on iteration, not when the
@@ -574,13 +640,21 @@ def walk(exp: Expansion, budget: int = MAX_STEPS) -> Iterator[datetime]:
                 f"the expander failed while producing occurrences: "
                 f"{type(exc).__name__}: {exc}",
             )
+        # Charge the caller for the candidates the expander had to step over to
+        # reach this occurrence, not merely for the occurrence itself.
+        if previous is not None:
+            gap = (dt - previous).total_seconds()
+            if gap > 0:
+                scanned += gap / exp.step_seconds
+        previous = dt
+        if scanned > scan_budget:
+            exp.budget_exhausted = True
+            return
+
         steps += 1
         if steps > budget:
-            raise _err(
-                "LIMIT_EXCEEDED",
-                f"the recurrence produced more than {budget} occurrences before "
-                "satisfying this request; narrow the rule, window, or limit",
-            )
+            exp.budget_exhausted = True
+            return
         yield dt
 
 
@@ -588,8 +662,21 @@ def walk(exp: Expansion, budget: int = MAX_STEPS) -> Iterator[datetime]:
 # Isolation
 # --------------------------------------------------------------------------
 
-# The wall-clock ceiling for one expansion, enforced in a separate process.
-SCAN_TIMEOUT_SECONDS = 5.0
+# The wall-clock backstop, enforced in a separate process.
+#
+# This is deliberately NOT the primary bound. A clock is not deterministic: when
+# it decides requests, identical input returns different answers under different
+# load, which is precisely what "deterministic" must not mean. MAX_SCAN_STEPS
+# above bounds every rule that yields anything, and does so identically on every
+# run.
+#
+# What a count cannot bound is a rule that yields NOTHING -- no occurrences means
+# no gaps to charge for -- while the expander scans toward its year ceiling
+# inside a single library call, where no deadline could be checked. That case,
+# and only that case, is what this kills. It is set well above the slowest
+# request the scan budget permits (measured at ~1.2s) so it cannot fire on a
+# request that is making progress.
+SCAN_TIMEOUT_SECONDS = 3.0
 
 
 def _isolated_entry(module_name: str, data: bytes, queue) -> None:
@@ -703,10 +790,15 @@ def effective_limit(limit: int, default: int = DEFAULT_LIMIT) -> int:
 
 
 def take(exp: Expansion, limit: int) -> Tuple[List[str], bool]:
-    """Collect up to `limit` formatted occurrences; report whether more remain."""
+    """Collect up to `limit` formatted occurrences; report whether more remain.
+
+    `truncated` covers both reasons a list can be short: the caller's limit, and
+    the scan budget. Both mean "there are more"; neither is an error, because
+    the occurrences returned are real and correct either way.
+    """
     out: List[str] = []
     for dt in walk(exp):
         if len(out) == limit:
             return out, True
         out.append(exp.format(dt))
-    return out, False
+    return out, exp.budget_exhausted

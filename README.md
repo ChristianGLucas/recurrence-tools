@@ -123,41 +123,59 @@ Recurrences are lazy and frequently infinite, so every traversal runs under an
 explicit budget. Exceeding one is a structured `LIMIT_EXCEEDED` error, never a
 hang:
 
-| Bound | Limit | Error when exceeded |
+| Bound | Limit | On exceeding |
 |---|---|---|
 | Rule length | 2048 characters | `LIMIT_EXCEEDED` |
 | `rdate` / `exdate` entries | 1000 each | `LIMIT_EXCEEDED` |
 | `COUNT` inside a rule | 10000 | `LIMIT_EXCEEDED` |
-| Occurrences visited per request | 200000 | `LIMIT_EXCEEDED` |
-| Wall-clock per expansion | 5 seconds | `LIMIT_EXCEEDED` |
+| Occurrences visited | 200000 | `truncated` (or `LIMIT_EXCEEDED`, below) |
+| **Candidate instants examined** | **20,000,000** | `truncated` (or `LIMIT_EXCEEDED`, below) |
+| Wall-clock backstop | 3 seconds | `LIMIT_EXCEEDED` |
 | `limit` argument | 10000 (default 100; `Count` defaults to 10000) | `INVALID_ARGUMENT` |
 
-The `limit` row is argument validation, not a budget — an out-of-range `limit`
-is a malformed request, so it returns `INVALID_ARGUMENT` while every genuine
-budget above returns `LIMIT_EXCEEDED`.
+**Cost is not result size.** `FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` is
+one occurrence per day, but the expander steps through every second in between —
+86400 candidate instants per occurrence returned. So the main budget counts
+**candidates examined**, not occurrences returned. It is derived from the gaps
+between the occurrences themselves, so it is a count rather than a clock: the
+same request stops at the same place on every machine and every run.
 
-Two things are bounded, because one does not imply the other:
+A large `limit` on a sparse rule therefore returns **fewer occurrences than
+asked for, flagged `truncated`** — real, correct occurrences, and an honest
+signal that more exist. It is never an error blaming the rule for being costly.
 
-1. **Occurrences visited**, not returned. A window query far in the future
-   would otherwise step over billions of occurrences it never returns.
-2. **Wall-clock, enforced out of process.** A rule can be valid and match
-   *nothing* — `FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30`, since February has no
-   30th. It yields no occurrences at all, so a budget counted over yielded
-   results never advances while the expander grinds toward year 9999. That hang
-   happens inside a single library call, where no deadline could be checked, so
-   each expansion runs in a child process with a hard 5-second limit; on
-   overrun the process is killed and the caller gets `LIMIT_EXCEEDED`.
+`NextOccurrence` and `Contains` have no partial form: a single answer cannot be
+half-given. When the budget stops them before they reach an answer they return
+`LIMIT_EXCEEDED`, because reporting "no next occurrence" or "not a member" from
+an unfinished search would be a wrong answer stated with confidence.
 
-**The rule itself is never rewritten.** An earlier version bounded cost by
-injecting a synthesized `UNTIL`, which changed the answer for sparse rules:
-`FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` is one occurrence per day, but a
-ceiling sized from `SECONDLY` steps landed before its first occurrence and
-reported a bound. Cost is bounded by the worker, never by altering what the
-caller asked for.
+**The wall-clock backstop is deliberately not the primary bound.** A clock is
+not deterministic; if it decided requests, identical input would return
+different answers under different load. It exists for the one case a count
+cannot reach: a rule that is valid and matches *nothing* —
+`FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30`, since February has no 30th — yields no
+occurrences at all, so there are no gaps to charge for, while the expander scans
+toward year 9999 inside a single library call where no deadline could be
+checked. Each expansion therefore runs in a child process that is killed at 3
+seconds. It sits well above the slowest request the scan budget permits (~1.2s),
+so it cannot fire on a request that is making progress.
 
-Hitting a bound is always a reported error, never a hang and never a silently
-short answer — and a rule that genuinely has no occurrences returns zero, which
-is an answer rather than a bound.
+**The caller's rule is never rewritten.** An earlier version bounded cost by
+injecting a synthesized `UNTIL`, which silently changed the answer for sparse
+rules — a ceiling sized from `SECONDLY` steps landed before the rule's own first
+occurrence. Cost is bounded by measuring and by isolation, never by altering
+what was asked.
+
+Hitting a bound is always either a flagged-short answer or a reported error —
+never a hang, and never a silently short answer that looks complete.
+
+## Composing on the error path
+
+`Recurrence` and `RuleInput` each carry an optional inbound `error`. When a flow
+wires an upstream node's `error` into it, the consuming node propagates that
+error verbatim and does no work. Without it a downstream node sees only empty
+fields and confidently blames the wrong one — reporting *"candidate is required"*
+for what was actually a `BYSETPOS` mistake, while the flow reports success.
 
 ## Errors
 

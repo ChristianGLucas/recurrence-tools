@@ -12,6 +12,15 @@ def _compute(ax: AxiomContext, input: NextRequest) -> Occurrence:
         for dt in walk(exp):
             if after is None or dt > after:
                 return Occurrence(occurrence=exp.format(dt), found=True)
+        if exp.budget_exhausted:
+            # Unlike a list, a single "next" cannot be returned partially: the
+            # search stopped early, so "none remains" would be a wrong answer.
+            raise RecurError(
+                "LIMIT_EXCEEDED",
+                "the search passed its scan budget before reaching an "
+                "occurrence after this instant; narrow the rule or move `after` "
+                "closer to the recurrence",
+            )
     except RecurError as exc:
         ax.log.info("next rejected input", code=exc.code)
         return Occurrence(error={"code": exc.code, "message": exc.message})

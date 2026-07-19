@@ -15,6 +15,8 @@ def parse(ax: AxiomContext, input: RuleInput) -> RuleParts:
     which a rule alone does not determine.
     """
     try:
+        if input.error.code:
+            raise RecurError(input.error.code, input.error.message)
         parts = check_rule(input.rrule)
         probe_rule(input.rrule)
     except RecurError as exc:

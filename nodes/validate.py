@@ -14,6 +14,8 @@ def validate(ax: AxiomContext, input: RuleInput) -> ValidationResult:
     order; on failure `error` names the part that was rejected.
     """
     try:
+        if input.error.code:
+            raise RecurError(input.error.code, input.error.message)
         parts = check_rule(input.rrule)
         probe_rule(input.rrule)
     except RecurError as exc:

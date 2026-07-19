@@ -3,6 +3,7 @@ from gen.axiom_context import AxiomContext
 
 from nodes._recur import (
     INT_LIST_PARTS,
+    MAX_RULE_LEN,
     RecurError,
     canonical_rule,
     check_rule,
@@ -29,6 +30,19 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
             return RuleOutput(
                 error={"code": input.error.code, "message": input.error.message}
             )
+
+        # Each entry costs at least one character plus a separator, so a field
+        # with more entries than the rule length allows can be refused before
+        # anything is built. Joining first would materialize a 200KB string only
+        # to reject it for exceeding 2048.
+        for name in ("byday",) + tuple(p.lower() for p in INT_LIST_PARTS):
+            values = getattr(input, name)
+            if len(values) * 2 > MAX_RULE_LEN:
+                raise RecurError(
+                    "LIMIT_EXCEEDED",
+                    f"{name.upper()} has {len(values)} entries, which cannot fit "
+                    f"in a rule of at most {MAX_RULE_LEN} characters",
+                )
 
         parts = []
         if input.freq:

@@ -1,13 +1,19 @@
-"""Bounds against costly input, including rules that cannot be bounded from outside.
+"""Bounds against costly input.
 
-The dangerous class here is a rule that is perfectly valid and matches NOTHING.
-It yields no occurrences, so any budget counted over yielded results never
-advances even once, while the expander scans on. The rewritten UNTIL catches
-most of these; the isolated worker catches the rest, because with certain part
-combinations the expander does not honour that UNTIL at all.
+Two shapes are dangerous and neither is visible in a result size:
 
-Every test below asserts BOTH a structured error and a wall-clock ceiling -- a
-bound that returns the right code after two minutes is not a bound.
+1. A rule that is valid and matches NOTHING. It yields no occurrences, so any
+   budget counted over yielded results never advances while the expander scans
+   on. Only the isolated worker's wall-clock backstop can stop this one, because
+   the scan happens inside a single library call.
+
+2. A rule that is valid and SPARSE -- one occurrence a day at a per-second
+   frequency. It yields steadily, but steps through 86400 candidates per
+   occurrence. This is bounded by counting candidates, and a count is what keeps
+   the answer identical on every machine and every run.
+
+Tests assert a wall-clock ceiling as well as a verdict: a bound that returns the
+right answer after two minutes is not a bound.
 """
 
 import time
@@ -21,10 +27,13 @@ from gen.messages_pb2 import (
     ExpandRequest,
     RuleInput,
 )
+from gen.messages_pb2 import NextRequest, RuleParts
 from nodes.between import between
+from nodes.build import build
 from nodes.contains import contains
 from nodes.count import count
 from nodes.expand import expand
+from nodes.parse import parse
 from nodes.next_occurrence import next_occurrence
 from nodes.testkit import NY, FakeContext, recurrence
 from nodes.validate import validate
@@ -283,12 +292,163 @@ def test_dst_edge_resolution_is_pinned():
         "20260308T023000",  # nonexistent locally; lands after the gap
         "20260309T023000",
     ]
-    # Fall back: 01:30 occurs twice on 2026-11-01. The first is used.
-    back = expand(
+    # Fall back: 01:30 occurs twice on 2026-11-01, at 05:30Z (EDT) and 06:30Z
+    # (EST). The wall-clock string is the same either way, so it cannot
+    # distinguish them -- only an absolute UTC window can, and it is the FIRST.
+    def utc_window(start, end):
+        result = between(
+            FakeContext(),
+            BetweenRequest(
+                recurrence=recurrence("FREQ=DAILY;COUNT=2", "20261031T013000", tzid=NY),
+                start=start, end=end,
+            ),
+        )
+        assert result.error.code == "", result.error.message
+        return list(result.occurrences)
+
+    assert utc_window("20261101T052000Z", "20261101T054000Z") == ["20261101T013000"]
+    assert utc_window("20261101T062000Z", "20261101T064000Z") == []
+
+    # Spring forward: 02:30 does not exist on 2026-03-08, and resolves to the
+    # instant after the gap -- 07:30Z, which is 03:30 EDT.
+    def spring(start, end):
+        result = between(
+            FakeContext(),
+            BetweenRequest(
+                recurrence=recurrence("FREQ=DAILY;COUNT=3", "20260307T023000", tzid=NY),
+                start=start, end=end,
+            ),
+        )
+        assert result.error.code == "", result.error.message
+        return list(result.occurrences)
+
+    assert spring("20260308T072000Z", "20260308T074000Z") == ["20260308T023000"]
+
+
+# --- The axes that must CROSS: rule density x requested limit ---------------
+#
+# Sparse rules and large limits were each covered, but never together, which is
+# where the defect lived: a rule yielding once a day still steps through every
+# second in between, so its cost is invisible in both its result size and its
+# occurrence count.
+
+SPARSE_RULES = [
+    "FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0",
+    "FREQ=MINUTELY;BYHOUR=9;BYMINUTE=30",
+    "FREQ=HOURLY;BYHOUR=9",
+]
+
+
+@pytest.mark.parametrize("rule", SPARSE_RULES)
+@pytest.mark.parametrize("limit", [100, 1100, 10000])
+def test_sparse_rules_at_every_limit_return_data_not_an_error(rule, limit):
+    """A sparse rule must never be refused for being sparse.
+
+    It may return fewer occurrences than asked for -- the scan budget is real --
+    but what comes back must be real occurrences with `truncated` set, never an
+    error blaming the rule for being too costly.
+    """
+    result, elapsed = timed(
+        lambda: expand(
+            FakeContext(),
+            ExpandRequest(
+                recurrence=recurrence(rule, "20200101T000000"), limit=limit
+            ),
+        )
+    )
+    assert result.error.code == "", result.error.message
+    assert result.count > 0
+    if result.count < limit:
+        assert result.truncated is True, "a short answer must be flagged"
+    assert elapsed < 2.5, f"took {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize("rule", SPARSE_RULES)
+def test_count_at_its_documented_default_serves_every_valid_rule(rule):
+    """Count's own default limit is 10000; the default request must work."""
+    result, elapsed = timed(
+        lambda: count(
+            FakeContext(),
+            CountRequest(recurrence=recurrence(rule, "20200101T000000")),
+        )
+    )
+    assert result.error.code == "", result.error.message
+    assert result.count > 0
+    assert elapsed < 2.5, f"took {elapsed:.1f}s"
+
+
+def test_identical_requests_give_identical_answers_near_the_budget():
+    """The bound must be a count, not a clock.
+
+    Sized so the request sits near the scan budget, which is exactly where a
+    wall-clock bound returned a different answer run to run depending on load.
+    """
+    request = ExpandRequest(
+        recurrence=recurrence(SPARSE_RULES[0], "20200101T000000"), limit=1040
+    )
+    outcomes = {
+        (r.error.code, r.count, r.truncated)
+        for r in (expand(FakeContext(), request) for _ in range(12))
+    }
+    assert len(outcomes) == 1, f"nondeterministic across 12 runs: {outcomes}"
+
+
+def test_nodes_that_cannot_answer_partially_report_the_budget():
+    """A single-answer node has no partial form, so silence would be a lie."""
+    rec = recurrence(SPARSE_RULES[0], "20200101T000000")
+    nxt = next_occurrence(
+        FakeContext(), NextRequest(recurrence=rec, after="21000101T000000")
+    )
+    assert nxt.error.code == "LIMIT_EXCEEDED"
+    assert nxt.found is False
+
+    member = contains(
+        FakeContext(), ContainsRequest(recurrence=rec, candidate="21000101T090000")
+    )
+    assert member.error.code == "LIMIT_EXCEEDED"
+    assert member.contains is False
+
+
+# --- Error propagation across a composed edge ------------------------------
+
+def test_an_upstream_error_is_propagated_not_re_derived():
+    """Chained nodes must report the mistake that happened, not invent one.
+
+    Without an inbound error channel a downstream node sees only empty fields
+    and confidently blames the wrong one -- reporting "candidate is required"
+    for what was actually a BYSETPOS mistake.
+    """
+    upstream = {"code": "INVALID_RULE", "message": "BYSETPOS must be used together with another BY* rule part"}
+    rec = dict(recurrence("", ""), error=upstream)
+
+    for result in (
+        expand(FakeContext(), ExpandRequest(recurrence=rec, limit=5)),
+        count(FakeContext(), CountRequest(recurrence=rec)),
+        next_occurrence(FakeContext(), NextRequest(recurrence=rec)),
+        contains(FakeContext(), ContainsRequest(recurrence=rec, candidate="20260101T000000")),
+        validate(FakeContext(), RuleInput(rrule="", error=upstream)),
+        parse(FakeContext(), RuleInput(rrule="", error=upstream)),
+    ):
+        assert result.error.code == "INVALID_RULE", result
+        assert "BYSETPOS" in result.error.message, result
+
+
+def test_caller_strings_echoed_into_errors_are_bounded():
+    """An error is a diagnostic, not a mirror: a huge input must not buy a
+    huge response."""
+    result = expand(
         FakeContext(),
         ExpandRequest(
-            recurrence=recurrence("FREQ=DAILY;COUNT=2", "20261031T013000", tzid=NY),
-            limit=2,
+            recurrence=recurrence("FREQ=DAILY;COUNT=1", "20260101T000000", tzid="A" * 200000),
+            limit=1,
         ),
     )
-    assert list(back.occurrences) == ["20261031T013000", "20261101T013000"]
+    assert result.error.code == "INVALID_ARGUMENT"
+    assert len(result.error.message) < 500, len(result.error.message)
+    assert "200000 characters" in result.error.message
+
+
+def test_oversized_repeated_fields_are_refused_before_being_built():
+    result = build(FakeContext(), RuleParts(freq="DAILY", bysetpos=[1] * 100000))
+    assert result.error.code == "LIMIT_EXCEEDED"
+    assert "100000 entries" in result.error.message
