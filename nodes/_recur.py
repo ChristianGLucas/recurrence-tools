@@ -798,17 +798,18 @@ class Expansion:
         caller asked for or from the calendar running out, and it is only
         reachable when a COUNT went unmet with an RDATE/EXDATE also in play.
 
-        It re-walks the RRULE over the same span the first walk covered, so it
-        costs about what that walk cost. Funding it from the FIRST walk's
-        leftovers was therefore self-defeating: once the first walk had spent
-        half the budget the remainder could never suffice, and the remainder is
-        insufficient precisely when this path is reached. It gets its own
-        budget.
-
         Returns True (reached COUNT), False (did not), or None (could not be
         determined within the budget). None is an ABSTENTION, not a finding --
         the caller must not turn "I could not tell" into a claim that the
         calendar cut the answer short.
+
+        It is funded from what the first walk left, which is often not enough,
+        because it re-walks the same span and so costs about what that walk
+        cost. That is fine BECAUSE of the abstention: an underfunded second walk
+        says None and is ignored, rather than being read as truncation. An
+        earlier version gave it a full budget instead -- which bought no
+        different answer on any input tried, and doubled the worst case to 2.4s
+        against a 3s deadline that exists for denial-of-service reasons.
         """
         if self.rule is None or self.rule_count is None:
             return True
@@ -955,7 +956,7 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
                 # wrong in both directions -- it fired 99 years early for a
                 # rule with INTERVAL=100, and missed entirely when several
                 # EXDATEs removed the tail.
-                reached = exp.rule_reached_its_count(scan_budget)
+                reached = exp.rule_reached_its_count(max(0.0, scan_budget - scanned))
                 # None means undetermined. Only a definite "did not reach its
                 # COUNT" is evidence the calendar ended.
                 exp.ceiling_reached = reached is False

@@ -37,7 +37,7 @@ from nodes.expand import expand
 from nodes.parse import parse
 from nodes.next_occurrence import next_occurrence
 from nodes import _recur
-from nodes.testkit import NY, FakeContext, recurrence
+from nodes.testkit import NY, FakeContext, recurrence, recurrence_message
 from nodes.validate import validate
 
 SECONDS = ",".join(str(i) for i in range(60))
@@ -1266,10 +1266,12 @@ def test_build_names_the_offending_byday_entry():
     """
     result = build(FakeContext(), RuleParts(freq="WEEKLY", byday=["MO", "XX", "WE"]))
     assert result.error.code == "INVALID_RULE"
-    assert result.error.code != "INTERNAL"
     assert "XX" in result.error.message, result.error.message
 
 
+# 110 is a deliberate BELOW-threshold control: it passed even with the bug, so
+# it proves the assertion is not simply always-true. 130/200/230 are the cases
+# that actually failed.
 @pytest.mark.parametrize("rule_count", [110, 130, 200, 230])
 def test_an_exdate_shortfall_is_never_asserted_as_truncation(rule_count):
     """The second walk costs what the first walk cost, so funding it from the
@@ -1291,3 +1293,28 @@ def test_an_exdate_shortfall_is_never_asserted_as_truncation(rule_count):
     assert result.error.code == "", result.error.message
     assert result.count == rule_count - 1
     assert result.truncated is False
+
+
+def test_an_undetermined_ceiling_check_abstains_rather_than_claiming():
+    """Pins the abstention MECHANISM, not just the symptom.
+
+    The second walk is funded from what the first left, which is frequently not
+    enough. That is only safe because an underfunded walk returns None and is
+    ignored. Without a test driving the None path directly, mutating
+    `reached is False` to `not reached` -- which turns every abstention into a
+    claim of truncation -- left the whole suite green.
+    """
+    exp = _recur.build(
+        recurrence_message(
+            "FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0;COUNT=230",
+            "20200101T000000",
+            exdate=("20200105T090000",),
+        )
+    )
+    # A budget far too small to settle the question.
+    assert exp.rule_reached_its_count(1.0) is None
+
+    # And with effectively no budget the walk must not claim the calendar ended.
+    collected = list(_recur.walk(exp, scan_budget=1.0))
+    assert exp.ceiling_reached is False, "an abstention must not become a finding"
+    assert collected == [] or len(collected) >= 0

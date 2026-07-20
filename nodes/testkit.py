@@ -43,3 +43,12 @@ def recurrence(rrule, dtstart, tzid="", rdate=(), exdate=()):
 
 # The anchor used by most RFC 5545 examples in section 3.8.5.3.
 NY = "America/New_York"
+
+
+def recurrence_message(rrule, dtstart, tzid="", rdate=(), exdate=()):
+    """A real Recurrence protobuf, for tests that call into _recur directly."""
+    from gen.messages_pb2 import Recurrence
+
+    return Recurrence(
+        rrule=rrule, dtstart=dtstart, tzid=tzid, rdate=list(rdate), exdate=list(exdate)
+    )

@@ -94,6 +94,11 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
         # malformed BYDAY entry reached the sorter, raised, and was caught by
         # the catch-all below as INTERNAL -- reporting a plain caller mistake as
         # a package fault, the exact inverse of what INTERNAL means.
+        #
+        # NOTE for future refactors: this ordering is now defence in depth
+        # rather than a gate. The sorter was also made non-raising, so reverting
+        # this order alone does NOT break any test. Do not assume a test will
+        # catch you if you swap these lines back.
         # De-duplicate list values before the length check. Measuring the raw
         # join meant byday=['MO']*700 was refused for exceeding 2048 characters
         # even though its canonical form is 'BYDAY=MO' -- input that worked
