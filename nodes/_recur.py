@@ -617,14 +617,17 @@ def zone_for(kind: str, tzid: str) -> Optional[tzinfo]:
                 "INVALID_ARGUMENT",
                 "tzid must not be set when dtstart is already UTC (ends with 'Z')",
             )
-        # "localtime" and "Factory" resolve through host configuration rather
-        # than to a fixed zone, so the same request would expand differently on
-        # different machines. A canonical IANA id always names a region.
-        if "/" not in tzid:
+        # Only these two resolve through host configuration rather than to a
+        # fixed zone. Requiring a "/" instead was far too blunt: it also refused
+        # UTC, GMT, EST, CET and ten more real fixed zones -- and TZID=UTC is
+        # among the most common tzids in actual calendar data, while the
+        # identical Etc/UTC was accepted. Unknown ids are still rejected below.
+        if tzid.lower() in ("localtime", "factory"):
             raise _err(
                 "INVALID_ARGUMENT",
-                f"tzid '{echo(tzid)}' is not a canonical IANA time-zone id; "
-                "use a region-qualified name such as 'America/New_York'",
+                f"tzid '{echo(tzid)}' resolves through host configuration, so "
+                "the same request would expand differently on different "
+                "machines; name a fixed zone such as 'UTC' or 'America/New_York'",
             )
         try:
             from zoneinfo import ZoneInfo
@@ -695,7 +698,18 @@ def cmp_key(dt: datetime) -> datetime:
     Normalising to UTC first removes the ambiguity, because a UTC instant is
     never fold-affected.
     """
-    return dt.astimezone(timezone.utc) if dt.tzinfo is not None else dt
+    if dt.tzinfo is None:
+        return dt
+    try:
+        return dt.astimezone(timezone.utc)
+    except OverflowError:
+        # A zoned instant whose UTC equivalent falls outside year 1..9999 --
+        # year 0001 in any positive-offset zone, the last hours of 9999 in any
+        # negative one. Expand emits these happily (it never compares), so
+        # crashing here made three nodes reject occurrences their sibling had
+        # just produced. Saturate in the direction of the overflow.
+        edge = datetime.min if dt.year <= 1 else datetime.max
+        return edge.replace(tzinfo=timezone.utc)
 
 
 def localize(dt: datetime, zone: Optional[tzinfo]) -> datetime:
@@ -784,6 +798,9 @@ class Expansion:
         # infinitely many occurrences and can only ever stop at the calendar's
         # end.
         self.rule_is_endless = False
+        # RDATEs add occurrences the RRULE did not produce, so the merged count
+        # cannot stand in for the rule's own.
+        self.has_rdate = False
 
     def format(self, dt: datetime) -> str:
         return format_instant(dt, self.kind, self.zone)
@@ -890,6 +907,7 @@ def build(recurrence) -> Expansion:
     # so conditioning this on them meant an endless recurrence carrying a single
     # EXDATE reported itself COMPLETE when it had merely run out of calendar.
     expansion.rule_is_endless = "COUNT" not in by_part and "UNTIL" not in by_part
+    expansion.has_rdate = bool(recurrence.rdate)
     return expansion
 
 
@@ -933,10 +951,8 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
                 exp.ceiling_reached = True
             elif exp.count_settles and steps < (exp.rule_count or 0):
                 exp.ceiling_reached = True
-            elif (
-                exp.rule_count is not None
-                and not exp.count_settles
-                and steps < exp.rule_count
+            elif exp.rule_count is not None and not exp.count_settles and (
+                steps < exp.rule_count or exp.has_rdate
             ):
                 # A COUNT went unmet while an RDATE or EXDATE was also in play,
                 # so the merged total cannot say which caused the shortfall.
@@ -945,12 +961,12 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
                 # than COUNT means the calendar ended; exactly COUNT means an
                 # EXDATE removed the difference.
                 #
-                # Gated on a SHORTFALL. If the merged walk already produced
-                # COUNT occurrences it cannot have been cut short by the
-                # calendar, so asking again is pure cost -- and it doubled the
-                # worst case (1.1s -> 2.3s) on the very path the time budget is
-                # sized for, turning working input into a timeout on a slower
-                # host.
+                # Gated on a shortfall -- EXCEPT when RDATEs are present. A
+                # merged total reaching COUNT proves the RRULE was not cut short
+                # only if every occurrence came from the RRULE. RDATEs are added
+                # independently, so they can pad the total back up to COUNT while
+                # the rule itself ran out of calendar, and the shortfall gate
+                # would never fire on a genuinely truncated answer.
                 #
                 # An earlier attempt guessed from proximity to year 9999 and was
                 # wrong in both directions -- it fired 99 years early for a

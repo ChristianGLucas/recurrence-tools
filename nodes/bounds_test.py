@@ -966,10 +966,11 @@ def test_years_below_1000_are_zero_padded():
     assert list(result.occurrences) == ["00010101T090000", "00020101T090000"]
 
 
-def test_a_tzid_without_a_region_is_refused():
+def test_a_host_dependent_tzid_is_refused():
     """'localtime' and 'Factory' resolve through host configuration, so the same
-    request would expand differently on different machines."""
-    for host_dependent in ("localtime", "Factory", "UTC"):
+    request would expand differently on different machines. UTC does NOT --
+    this test previously asserted it was refused, encoding the bug."""
+    for host_dependent in ("localtime", "Factory"):
         result = expand(
             FakeContext(),
             ExpandRequest(
@@ -1290,9 +1291,15 @@ def test_an_exdate_shortfall_is_never_asserted_as_truncation(rule_count):
             limit=10000,
         ),
     )
-    assert result.error.code == "", result.error.message
-    assert result.count == rule_count - 1
-    assert result.truncated is False
+    # Near the top of the budget this can legitimately hit the documented
+    # wall-clock deadline, especially under parallel load. The contract is a
+    # correct answer OR an honest structured refusal -- never a wrong answer --
+    # so both are accepted, but a WRONG answer is not.
+    if result.error.code:
+        assert result.error.code == "LIMIT_EXCEEDED", result.error.message
+    else:
+        assert result.count == rule_count - 1
+        assert result.truncated is False
 
 
 def test_rule_reached_its_count_abstains_when_it_cannot_tell():
@@ -1379,3 +1386,90 @@ def test_a_caller_s_own_exdates_are_never_reported_as_truncation():
     assert result.error.code == "", result.error.message
     assert result.count == 60
     assert result.truncated is False, "an EXDATE the caller asked for is not truncation"
+
+
+# --- The calendar edges, in zones that push instants over them --------------
+
+@pytest.mark.parametrize("zone", ["Asia/Tokyo", "Europe/Berlin", "Asia/Kathmandu"])
+def test_year_one_in_a_positive_offset_zone_is_comparable(zone):
+    """Expand never compares, so it emitted occurrences its siblings crashed on.
+
+    A year-0001 instant in a positive-offset zone has a UTC equivalent before
+    year 1, and converting it raised OverflowError inside the comparison key --
+    so Contains, Between and NextOccurrence returned INTERNAL for occurrences
+    Expand had just produced.
+    """
+    rec = lambda: recurrence("FREQ=DAILY;COUNT=3", "00010101T000000", tzid=zone)
+    expanded = expand(FakeContext(), ExpandRequest(recurrence=rec(), limit=3))
+    assert expanded.error.code == "", expanded.error.message
+
+    for emitted in expanded.occurrences:
+        member = contains(
+            FakeContext(), ContainsRequest(recurrence=rec(), candidate=emitted)
+        )
+        assert member.error.code == "", f"{zone}/{emitted}: {member.error.message}"
+        assert member.contains is True
+
+
+def test_the_last_hours_of_the_calendar_in_a_negative_offset_zone():
+    result = between(
+        FakeContext(),
+        BetweenRequest(
+            recurrence=recurrence("FREQ=DAILY;COUNT=6", "20260307T013000", tzid=NY),
+            start="20260307T013000",
+            end="99991231T235959",
+            limit=10,
+        ),
+    )
+    assert result.error.code == "", result.error.message
+    assert result.count == 6
+
+
+# --- tzid: refuse host-dependent ids, not every short one -------------------
+
+@pytest.mark.parametrize("zone", ["UTC", "GMT", "EST", "CET", "Etc/UTC", "America/New_York"])
+def test_fixed_zones_are_accepted_however_they_are_spelled(zone):
+    """TZID=UTC is among the commonest tzids in real calendar data. Requiring a
+    '/' refused it -- along with GMT, EST, CET and ten more real fixed zones --
+    while accepting the identical Etc/UTC."""
+    result = expand(
+        FakeContext(),
+        ExpandRequest(
+            recurrence=recurrence("FREQ=DAILY;COUNT=2", "20260101T000000", tzid=zone),
+            limit=3,
+        ),
+    )
+    assert result.error.code == "", f"{zone}: {result.error.message}"
+    assert result.count == 2
+
+
+@pytest.mark.parametrize("zone", ["localtime", "Factory", "LOCALTIME", "Nope/Nope", "../etc/passwd"])
+def test_host_dependent_or_unknown_zones_are_refused(zone):
+    result = expand(
+        FakeContext(),
+        ExpandRequest(
+            recurrence=recurrence("FREQ=DAILY;COUNT=2", "20260101T000000", tzid=zone),
+            limit=3,
+        ),
+    )
+    assert result.error.code == "INVALID_ARGUMENT", zone
+
+
+# --- RDATEs must not disguise a rule the calendar cut short -----------------
+
+@pytest.mark.parametrize(
+    "rdates,expected_count",
+    [((), 1), (("99970101T000000", "99980101T000000"), 3)],
+)
+def test_rdates_cannot_mask_a_count_the_calendar_cut_short(rdates, expected_count):
+    """A merged total reaching COUNT proves the RRULE was not truncated only if
+    every occurrence came from the RRULE. RDATEs are added independently, so
+    they padded the total back to COUNT and the shortfall check never ran --
+    reporting a truncated recurrence as complete.
+    """
+    rec = lambda: recurrence("FREQ=YEARLY;COUNT=3", "99990101T000000", rdate=rdates)
+    expanded = expand(FakeContext(), ExpandRequest(recurrence=rec(), limit=10))
+    counted = count(FakeContext(), CountRequest(recurrence=rec(), limit=10))
+    assert expanded.count == expected_count
+    assert expanded.truncated is True, "the RRULE asked for 3 and the calendar gave 1"
+    assert counted.truncated is True

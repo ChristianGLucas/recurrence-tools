@@ -51,6 +51,11 @@ every occurrence is emitted in the same form as the `dtstart` that anchored it:
 | Floating `DATE-TIME` | `19970902T090000` | `19970902T090000` |
 | UTC `DATE-TIME` | `19970902T090000Z` | `19970902T090000Z` |
 
+Any zone `zoneinfo` knows is accepted, including short fixed ones like `UTC`,
+`GMT` and `CET`. Only `localtime` and `Factory` are refused, because they
+resolve through host configuration and would make the same request expand
+differently on different machines.
+
 With `tzid` set, occurrences keep **wall-clock time across DST transitions** —
 a weekly 09:00 meeting in New York stays at 09:00 when the offset moves from
 −05:00 to −04:00. That is what a calendar means by "every week at 9".
