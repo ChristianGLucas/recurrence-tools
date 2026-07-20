@@ -1,5 +1,5 @@
 name: christiangeorgelucas/recurrence-tools
-version: 0.1.1
+version: 0.1.2
 language: python
 description: >-
   Composable RFC 5545 recurrence nodes over a single Recurrence envelope —
