@@ -1062,19 +1062,28 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
 
 # The wall-clock backstop, enforced in a separate process.
 #
-# This is deliberately NOT the primary bound. A clock is not deterministic: when
-# it decides requests, identical input returns different answers under different
-# load, which is precisely what "deterministic" must not mean. MAX_SCAN_STEPS
-# above bounds every rule that yields anything, and does so identically on every
-# run.
+# What this is for: a valid rule can match NOTHING -- FREQ=HOURLY;BYMONTH=2;
+# BYMONTHDAY=30, since February has no 30th -- and the expander then scans
+# toward year 9999 INSIDE A SINGLE next() call. Control never comes back, so no
+# deadline this code could check would ever fire. Killing the process is the
+# only way to stop it, which is why expansion runs in a child at all.
 #
-# What a count cannot bound is a rule that yields NOTHING -- no occurrences means
-# no gaps to charge for -- while the expander scans toward its year ceiling
-# inside a single library call, where no deadline could be checked. That case,
-# and only that case, is what this kills. It is set well above the slowest
-# request the scan budget permits (measured at ~1.2s) so it cannot fire on a
-# request that is making progress.
-SCAN_TIMEOUT_SECONDS = 3.0
+# What the NUMBER is for: latency, not security. The security-relevant property
+# is finite-versus-infinite -- without any bound one request occupies a worker
+# forever and the pool never recovers; with any finite bound workers are
+# reclaimed. Three seconds is no more "secure" than ten: an attacker sends more
+# requests, and total consumption is bounded by per-caller rate limiting, which
+# is the platform's job and not something this package can do.
+#
+# So it is derived from latency: the slowest legitimate request measures ~1.2s,
+# the ceiling check can re-walk the rule for ~2.4s, and a slower host doubles
+# that. Five seconds leaves real headroom.
+#
+# It was briefly lowered to 3s in response to a review that measured the CPU a
+# small request can buy -- but that review explicitly said no change was
+# required and to rate-limit at the platform instead. Tightening it anyway
+# removed the margin and broke the build on a host only twice as slow.
+SCAN_TIMEOUT_SECONDS = 5.0
 
 # How long reaping a killed worker may add on top. Kept small deliberately: the
 # caller's worst case is SCAN_TIMEOUT_SECONDS + this, and that total is the

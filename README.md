@@ -152,7 +152,7 @@ hang:
 | Impossible `BYMONTH`/`BYMONTHDAY` pair | refused up front | `INVALID_RULE` |
 | Impossible `BYYEARDAY`/`BYMONTH` pair | refused up front | `INVALID_RULE` |
 | `BYSETPOS` beyond an interval's capacity | refused up front where the capacity is knowable | `INVALID_RULE` |
-| Wall-clock backstop | 3s deadline, ~3.5s worst case for the caller | `LIMIT_EXCEEDED` |
+| Wall-clock backstop | 5s deadline, ~5.5s worst case for the caller | `LIMIT_EXCEEDED` |
 | `limit` argument | 10000 accepted (default 100; `Count` defaults to 10000) | `INVALID_ARGUMENT` |
 
 **Cost is not result size.** `FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` is
@@ -196,15 +196,25 @@ backstop below.
 **The wall-clock backstop is deliberately not the primary bound.** A clock is
 not deterministic; if it decided requests, identical input could return
 different answers under different load. Each expansion runs in a child process
-whose result is awaited for 3 seconds; a worker that overruns is killed, which
-adds up to 0.5s more, so **the caller's worst case is about 3.5 seconds** — that
-is the number to size a client timeout against, not the internal 3s deadline.
+whose result is awaited for 5 seconds; a worker that overruns is killed, which
+adds up to 0.5s more, so **the caller's worst case is about 5.5 seconds per
+request, uncontended.** Size a client timeout against that rather than the
+internal deadline — and note it bounds this package's own work, not end-to-end
+latency, which also includes platform queueing.
+
+The number is a **latency** bound, not a security control. What matters for
+safety is that the bound is finite at all: without one, a single request that
+never terminates occupies a worker permanently. Three seconds would be no more
+secure than five — an attacker simply sends more requests, and total
+consumption is bounded by per-caller rate limiting, which belongs to the
+platform. Five is derived from the slowest legitimate request (~1.2s), the
+ceiling check's possible re-walk (~2.4s), and room for a slower host.
 
 Measured on this machine, worst of three runs each: a scan-saturating sparse
 rule ~1.2s, a `MINUTELY` sparse rule at the maximum limit ~0.9s, a dense
 expansion at the maximum limit ~0.03s (~0.45s over HTTP, dominated by
 serializing 10000 strings). The **ceiling check can re-walk the rule, so that
-path measures ~2.4s** — about 80% of the 3s deadline. Under concurrent load the
+path measures ~2.4s** — about half the 5s deadline. Under concurrent load the
 deadline is genuinely reached, and reaching it produces a structured
 `LIMIT_EXCEEDED`, never a hang or a wrong answer. Treat all of these as
 indicative of one machine, not as a contract.
