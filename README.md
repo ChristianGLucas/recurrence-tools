@@ -137,6 +137,7 @@ hang:
 | **Candidate instants examined** | **20,000,000** | `truncated` (or `LIMIT_EXCEEDED`, below) |
 | Impossible `BYMONTH`/`BYMONTHDAY` pair | refused up front | `INVALID_RULE` |
 | Impossible `BYYEARDAY`/`BYMONTH` pair | refused up front | `INVALID_RULE` |
+| `BYSETPOS` beyond an interval's capacity | refused up front | `INVALID_RULE` |
 | Wall-clock backstop | 3s deadline, ~3.5s worst case for the caller | `LIMIT_EXCEEDED` |
 | `limit` argument | 10000 accepted (default 100; `Count` defaults to 10000) | `INVALID_ARGUMENT` |
 
@@ -159,7 +160,14 @@ an unfinished search would be a wrong answer stated with confidence.
 **Rules that can never occur are refused up front.** `BYMONTH=2;BYMONTHDAY=30`
 has no answer to find — February has no 30th — and the expander would only
 discover that by scanning to year 9999. A calendar fact settles it in
-microseconds instead, with an error naming the real problem.
+microseconds instead, with an error naming the real problem. The same applies to
+a `BYYEARDAY`/`BYMONTH` pair no calendar produces (day 366 falls only in
+December) and to a `BYSETPOS` position beyond what one interval can hold (a
+`SECONDLY` interval contains exactly one instant, so there is no 300th).
+
+Each of these compares against a deliberate *ceiling* rather than an exact
+count, so it can refuse the impossible but never the possible: every refusal is
+cross-checked in the test suite against what the expander itself can produce.
 
 **The wall-clock backstop is deliberately not the primary bound.** A clock is
 not deterministic; if it decided requests, identical input could return

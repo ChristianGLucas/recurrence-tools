@@ -730,3 +730,42 @@ def test_a_package_fault_is_never_reported_as_the_callers_rule(monkeypatch):
     assert result.error.code == "INTERNAL"
     assert "Traceback" not in result.error.message
     assert "RuntimeError" not in result.error.message
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=SECONDLY;BYSETPOS=300;BYSECOND=0",
+        "FREQ=SECONDLY;BYSETPOS=2;BYSECOND=0",
+        "FREQ=MINUTELY;BYSETPOS=61;BYSECOND=0",
+        "FREQ=HOURLY;BYSETPOS=-3601;BYSECOND=0",
+    ],
+)
+def test_impossible_bysetpos_positions_are_refused_immediately(rule):
+    """BYSETPOS selects the Nth instant in one interval; a SECONDLY interval
+    holds exactly one. Asking for the 300th cost the full time budget to
+    discover -- the last cheap way to buy it."""
+    result, elapsed = timed(
+        lambda: count(
+            FakeContext(),
+            CountRequest(recurrence=recurrence(rule, "20260101T000000"), limit=5),
+        )
+    )
+    assert result.error.code == "INVALID_RULE", result
+    assert "beyond what a" in result.error.message
+    assert elapsed < 1.0, f"took {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=MONTHLY;BYSETPOS=-2;BYDAY=MO,TU,WE,TH,FR",  # RFC's own example
+        "FREQ=MONTHLY;BYSETPOS=3;BYDAY=TU,WE,TH",         # RFC's own example
+        "FREQ=YEARLY;BYSETPOS=366;BYDAY=MO",
+        "FREQ=DAILY;BYSETPOS=1;BYHOUR=9",
+    ],
+)
+def test_possible_bysetpos_positions_are_not_refused(rule):
+    """The ceiling is per-interval capacity, which BY* parts only narrow -- so
+    it can refuse the impossible but must never refuse the possible."""
+    assert validate(FakeContext(), RuleInput(rrule=rule)).valid is True

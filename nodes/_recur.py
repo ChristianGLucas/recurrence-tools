@@ -236,6 +236,7 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
     # the values, so running it first would hand it input nobody had validated.
     _check_month_day_feasible(parts)
     _check_yearday_month_feasible(parts)
+    _check_setpos_feasible(parts, freq)
     return parts
 
 
@@ -308,6 +309,46 @@ def _check_yearday_month_feasible(parts: List[Tuple[str, str]]) -> None:
             f"BYYEARDAY={by['BYYEARDAY']} can never fall in "
             f"BYMONTH={by['BYMONTH']}; those days occur in "
             f"month(s) {','.join(str(m) for m in sorted(reachable))}",
+        )
+
+
+# The most instants any single interval can contain, per frequency. A ceiling,
+# not the true set size -- BY* parts only ever narrow it -- so comparing against
+# it can refuse an impossible rule but can never refuse a possible one.
+MAX_SET_SIZE = {
+    "SECONDLY": 1,
+    "MINUTELY": 60,
+    "HOURLY": 3600,
+    "DAILY": 86_400,
+    "WEEKLY": 7 * 86_400,
+    "MONTHLY": 31 * 86_400,
+    "YEARLY": 366 * 86_400,
+}
+
+
+def _check_setpos_feasible(parts: List[Tuple[str, str]], freq: str) -> None:
+    """Refuse a BYSETPOS position no interval could ever contain.
+
+    BYSETPOS selects the Nth instant within one interval. A SECONDLY interval
+    holds exactly one instant, so BYSETPOS=300 selects a 300th that cannot
+    exist -- and the expander discovers that only by scanning to its year
+    ceiling, which is the last cheap way to buy the full time budget.
+    """
+    by = {k: v for k, v in parts}
+    if "BYSETPOS" not in by:
+        return
+    ceiling = MAX_SET_SIZE.get(freq)
+    if ceiling is None:
+        return
+    try:
+        positions = [abs(int(v)) for v in by["BYSETPOS"].split(",")]
+    except ValueError:  # pragma: no cover - _check_part rejects these first
+        return
+    if positions and min(positions) > ceiling:
+        raise _err(
+            "INVALID_RULE",
+            f"BYSETPOS={by['BYSETPOS']} selects a position beyond what a "
+            f"FREQ={freq} interval can contain (at most {ceiling})",
         )
 
 
