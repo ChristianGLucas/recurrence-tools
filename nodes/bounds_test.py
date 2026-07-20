@@ -1295,15 +1295,9 @@ def test_an_exdate_shortfall_is_never_asserted_as_truncation(rule_count):
     assert result.truncated is False
 
 
-def test_an_undetermined_ceiling_check_abstains_rather_than_claiming():
-    """Pins the abstention MECHANISM, not just the symptom.
-
-    The second walk is funded from what the first left, which is frequently not
-    enough. That is only safe because an underfunded walk returns None and is
-    ignored. Without a test driving the None path directly, mutating
-    `reached is False` to `not reached` -- which turns every abstention into a
-    claim of truncation -- left the whole suite green.
-    """
+def test_rule_reached_its_count_abstains_when_it_cannot_tell():
+    """The three-state return itself. `None` means undetermined -- neither a
+    ceiling nor a completeness finding."""
     exp = _recur.build(
         recurrence_message(
             "FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0;COUNT=230",
@@ -1311,10 +1305,40 @@ def test_an_undetermined_ceiling_check_abstains_rather_than_claiming():
             exdate=("20200105T090000",),
         )
     )
-    # A budget far too small to settle the question.
     assert exp.rule_reached_its_count(1.0) is None
+    assert exp.rule_reached_its_count(_recur.MAX_SCAN_STEPS) is True
 
-    # And with effectively no budget the walk must not claim the calendar ended.
-    collected = list(_recur.walk(exp, scan_budget=1.0))
-    assert exp.ceiling_reached is False, "an abstention must not become a finding"
-    assert collected == [] or len(collected) >= 0
+
+# --- Ceiling coverage partitioned by BUDGET GEOMETRY ------------------------
+#
+# Chosen from the three bands the second walk can land in, rather than from
+# whatever last broke. The middle band is the one that produced a silent wrong
+# answer: the first walk finished, but had spent more than half the budget, so
+# funding the ceiling check from the remainder left the question unanswerable
+# and the short answer was reported as complete.
+
+@pytest.mark.parametrize(
+    "dtstart,band",
+    [
+        ("99991001T000000", "first walk spends under half the budget"),
+        ("99990601T000000", "first walk spends over half -- the silent-wrong-answer band"),
+        ("99990401T000000", "first walk exhausts the budget outright"),
+    ],
+)
+def test_a_ceiling_is_reported_in_every_budget_band(dtstart, band):
+    """A COUNT the calendar cannot satisfy must never look complete, wherever
+    the first walk's cost happens to land."""
+    result = count(
+        FakeContext(),
+        CountRequest(
+            recurrence=recurrence(
+                "FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0;COUNT=1000",
+                dtstart,
+                exdate=("99990605T090000",),
+            ),
+            limit=10000,
+        ),
+    )
+    assert result.count < 1000
+    incomplete = result.truncated or bool(result.error.code)
+    assert incomplete, f"claimed complete in the band where {band}"

@@ -956,10 +956,20 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
                 # wrong in both directions -- it fired 99 years early for a
                 # rule with INTERVAL=100, and missed entirely when several
                 # EXDATEs removed the tail.
-                reached = exp.rule_reached_its_count(max(0.0, scan_budget - scanned))
-                # None means undetermined. Only a definite "did not reach its
-                # COUNT" is evidence the calendar ended.
-                exp.ceiling_reached = reached is False
+                # Funded in FULL, not from what this walk left over. The
+                # second walk re-covers the same span, so leftovers suffice only
+                # when the first walk used less than half the budget -- and in
+                # the band above that, the question went unanswered and a
+                # genuine calendar-end truncation was reported as a complete
+                # answer. Leftover funding is cheaper (1.4s vs 2.4s) but buys
+                # that speed with a wrong answer, and an honest refusal on a
+                # slow host beats a fast lie.
+                reached = exp.rule_reached_its_count(scan_budget)
+                # Three states, and only ONE of them means "complete": a
+                # definite True. False is a ceiling; None is "could not tell",
+                # which must not be reported as completeness either. Collapsing
+                # None in with True is what produced the wrong answer above.
+                exp.ceiling_reached = reached is not True
             return
         except RecurError:
             raise
