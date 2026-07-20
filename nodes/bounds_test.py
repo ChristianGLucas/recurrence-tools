@@ -28,7 +28,7 @@ from gen.messages_pb2 import (
     ExpandRequest,
     RuleInput,
 )
-from gen.messages_pb2 import NextRequest, RuleParts
+from gen.messages_pb2 import NextRequest, RuleInput, RuleParts
 from nodes.between import between
 from nodes.build import build
 from nodes.contains import contains
@@ -1018,3 +1018,179 @@ def test_validate_accepting_a_by_part_value_means_expand_accepts_it_too():
         assert valid == (served.error.code == ""), (
             f"{rule}: Validate says {valid} but Expand says {served.error.code or 'ok'}"
         )
+
+
+# --- Killing tests for mutants that survived: min() vs max() ---------------
+#
+# Both feasibility checks ask whether the LEAST demanding value in a list is
+# satisfiable, because one satisfiable value makes the whole rule possible.
+# Every earlier test used a single-valued list, where min and max coincide, so
+# swapping them changed nothing the suite noticed -- while turning each check
+# into a false refusal of a perfectly valid rule.
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        # Feb 30 is impossible but Feb 1 is not, so the rule CAN occur.
+        "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=1,30",
+        "FREQ=YEARLY;BYMONTH=4;BYMONTHDAY=15,31",
+        "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30,29",
+        "FREQ=YEARLY;BYMONTH=2,4;BYMONTHDAY=31,15",
+    ],
+)
+def test_a_month_day_list_with_one_possible_value_is_accepted(rule):
+    assert validate(FakeContext(), RuleInput(rrule=rule)).valid is True
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30,31",
+        "FREQ=YEARLY;BYMONTH=4;BYMONTHDAY=31",
+        "FREQ=YEARLY;BYMONTH=2,4;BYMONTHDAY=31",
+    ],
+)
+def test_a_month_day_list_with_no_possible_value_is_refused(rule):
+    result = validate(FakeContext(), RuleInput(rrule=rule))
+    assert result.valid is False
+    assert "can never occur" in result.error.message
+
+
+# Values stay inside dateutil's own +/-366 BYSETPOS limit, so what is being
+# tested is THIS package's per-frequency capacity check rather than the
+# library's unrelated hard bound.
+@pytest.mark.parametrize(
+    "freq,positions",
+    [
+        ("SECONDLY", "1,300"),   # a SECONDLY interval holds 1 instant; 1 is reachable
+        ("MINUTELY", "1,300"),
+        ("MINUTELY", "60,300"),  # 60 is exactly the capacity
+        ("HOURLY", "1,300"),
+        ("DAILY", "300,-300"),
+    ],
+)
+def test_a_setpos_list_with_one_reachable_position_is_accepted(freq, positions):
+    rule = f"FREQ={freq};BYMONTHDAY=1;BYSETPOS={positions}"
+    assert validate(FakeContext(), RuleInput(rrule=rule)).valid is True
+
+
+@pytest.mark.parametrize(
+    "freq,positions",
+    [("SECONDLY", "2,300"), ("SECONDLY", "5,100"), ("MINUTELY", "61,300")],
+)
+def test_a_setpos_list_with_no_reachable_position_is_refused(freq, positions):
+    rule = f"FREQ={freq};BYMONTHDAY=1;BYSETPOS={positions}"
+    result = validate(FakeContext(), RuleInput(rrule=rule))
+    assert result.valid is False
+    assert "beyond what a" in result.error.message
+
+
+# --- The year-9999 ceiling must be flagged, whatever else the rule carries --
+
+@pytest.mark.parametrize(
+    "rdate,exdate",
+    [((), ()), (("99991228T120000",), ()), ((), ("99991229T000000",))],
+)
+def test_an_endless_rule_at_the_ceiling_is_never_reported_complete(rdate, exdate):
+    """An RDATE adds occurrences and an EXDATE removes them; neither gives an
+    infinite rule an end. Conditioning endlessness on their absence made a rule
+    that had merely run out of calendar look exhaustive."""
+    rec = recurrence("FREQ=DAILY", "99991228T000000", rdate=rdate, exdate=exdate)
+    expanded = expand(FakeContext(), ExpandRequest(recurrence=rec, limit=50))
+    counted = count(FakeContext(), CountRequest(recurrence=rec, limit=50))
+    assert expanded.truncated is True, "an endless rule cannot be complete"
+    assert counted.truncated is True
+    assert expanded.count == counted.count
+
+
+def test_a_count_left_unmet_by_the_ceiling_is_flagged_even_with_exdate():
+    rec = recurrence(
+        "FREQ=DAILY;COUNT=10", "99991228T000000", exdate=("99991229T000000",)
+    )
+    result = expand(FakeContext(), ExpandRequest(recurrence=rec, limit=50))
+    assert result.count < 10
+    assert result.truncated is True
+
+
+def test_no_caller_input_makes_any_node_report_an_internal_fault():
+    """INTERNAL means the package broke. A caller mistake must never earn it,
+    or callers get sent to debug input that was fine."""
+    malformed = [
+        RuleParts(freq="WEEKLY", byday=["XX"]),
+        RuleParts(freq="WEEKLY", byday=["Monday"]),
+        RuleParts(freq="WEEKLY", byday=["+"]),
+        RuleParts(freq="NOPE"),
+        RuleParts(freq="DAILY", bysetpos=[1]),
+    ]
+    for parts in malformed:
+        result = build(FakeContext(), parts)
+        assert result.error.code != "INTERNAL", f"{parts} -> {result.error.message}"
+
+
+# --- Ceiling detection must be exact, not proximate -------------------------
+#
+# An earlier attempt guessed from proximity to year 9999, and was wrong in both
+# directions: it fired 99 years early for a rule with INTERVAL=100 (whose step
+# is itself a century), and missed entirely when several EXDATEs removed the
+# tail. COUNT bounds the RRULE alone, so the question is exactly answerable --
+# ask the RRULE how many it produced.
+
+@pytest.mark.parametrize(
+    "rule,dtstart",
+    [
+        ("FREQ=YEARLY;INTERVAL=100;COUNT=3", "97000101T000000"),
+        ("FREQ=MONTHLY;INTERVAL=1200;COUNT=3", "97000101T000000"),
+        ("FREQ=YEARLY;INTERVAL=50;COUNT=3", "97000101T000000"),
+        ("FREQ=DAILY;COUNT=3", "20260101T000000"),
+    ],
+)
+def test_an_exdate_shortfall_away_from_the_ceiling_is_not_truncation(rule, dtstart):
+    """The RRULE delivered everything it promised and the caller removed one.
+    That is a complete answer, however wide the rule's own step happens to be."""
+    excluded = expand(
+        FakeContext(),
+        ExpandRequest(
+            recurrence=recurrence(rule, dtstart, exdate=("98000101T000000", "20260102T000000")),
+            limit=50,
+        ),
+    )
+    assert excluded.error.code == "", excluded.error.message
+    assert excluded.truncated is False, "an EXDATE the caller asked for is not truncation"
+
+
+@pytest.mark.parametrize("exdates", [
+    ("99991229T000000",),
+    ("99991229T000000", "99991230T000000"),
+    ("99991229T000000", "99991230T000000", "99991231T000000"),
+])
+def test_a_count_unmet_at_the_ceiling_is_flagged_however_many_exdates(exdates):
+    """Parametrised over the tail-removal shape: a single-EXDATE test passed
+    while the same bug survived with three."""
+    result = expand(
+        FakeContext(),
+        ExpandRequest(
+            recurrence=recurrence("FREQ=DAILY;COUNT=10", "99991228T000000", exdate=exdates),
+            limit=50,
+        ),
+    )
+    assert result.error.code == "", result.error.message
+    assert result.count < 10
+    assert result.truncated is True, "COUNT was unmet because the calendar ended"
+
+
+# --- A redundant list must not be refused for a length it never has ---------
+
+@pytest.mark.parametrize(
+    "freq,entry,repeats,expected",
+    [
+        ("WEEKLY", "MO", 700, "FREQ=WEEKLY;BYDAY=MO"),
+        ("WEEKLY", "MO", 1000, "FREQ=WEEKLY;BYDAY=MO"),
+        ("MONTHLY", "+1MO", 500, "FREQ=MONTHLY;BYDAY=1MO"),
+    ],
+)
+def test_a_repeated_list_is_measured_after_deduplication(freq, entry, repeats, expected):
+    """Validating the raw join measured a length the canonical form never has,
+    so input that worked before was refused as too long."""
+    result = build(FakeContext(), RuleParts(freq=freq, byday=[entry] * repeats))
+    assert result.error.code == "", result.error.message
+    assert result.rrule == expected

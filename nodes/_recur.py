@@ -68,10 +68,6 @@ FREQ_STEP_SECONDS = {
     "YEARLY": 31_622_400,   # 366 days
 }
 
-# The last representable year. A recurrence running past it stops because the
-# calendar ended, not because the rule did -- a distinction callers must be told.
-MAX_YEAR = 9999
-
 FREQS = ("SECONDLY", "MINUTELY", "HOURLY", "DAILY", "WEEKLY", "MONTHLY", "YEARLY")
 WEEKDAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
 
@@ -529,9 +525,16 @@ def _canonical_value(key: str, value: str) -> str:
             (item[1:] if item.startswith("+") else item).upper()
             for item in value.split(",")
         }
-        return ",".join(
-            sorted(entries, key=lambda e: (WEEKDAYS.index(e[-2:]), int(e[:-2] or 0)))
-        )
+        def order(entry):
+            # Only validated entries should reach here. This must not be the
+            # thing that raises if one ever does -- an unrecognised entry sorts
+            # last rather than crashing the caller's request.
+            try:
+                return (WEEKDAYS.index(entry[-2:]), int(entry[:-2] or 0))
+            except (ValueError, TypeError):
+                return (len(WEEKDAYS), 0)
+
+        return ",".join(sorted(entries, key=order))
     if key in INT_LIST_PARTS:
         # De-duplicated and ordered: two spellings of the same rule must produce
         # the same canonical text, or `normalized` cannot serve as a key.
@@ -744,8 +747,12 @@ class Expansion:
     """A parsed recurrence, ready to be walked."""
 
     def __init__(self, rset: rruleset, kind: str, zone: Optional[tzinfo],
-                 anchor: Optional[datetime] = None, step_seconds: int = 86_400):
+                 anchor: Optional[datetime] = None, step_seconds: int = 86_400,
+                 rule=None):
         self.rset = rset
+        # The RRULE on its own, kept so COUNT can be judged against what the
+        # rule itself produced rather than against the merged set.
+        self.rule = rule
         self.kind = kind
         self.zone = zone
         # Where the scan starts, and how much calendar one candidate covers --
@@ -774,6 +781,21 @@ class Expansion:
 
     def instant(self, value: str, field: str) -> datetime:
         return coerce(value, field, self.zone, self.kind)
+
+    def rrule_yield_count(self) -> int:
+        """How many occurrences the RRULE alone produces, capped at its COUNT.
+
+        Bounded by COUNT (at most MAX_LIMIT) and reached only on the rare path
+        where a COUNT went unmet alongside an RDATE or EXDATE.
+        """
+        if self.rule is None or self.rule_count is None:
+            return 0
+        produced = 0
+        for _ in self.rule:
+            produced += 1
+            if produced >= self.rule_count:
+                break
+        return produced
 
 
 def build(recurrence) -> Expansion:
@@ -827,16 +849,15 @@ def build(recurrence) -> Expansion:
     freq = by_part.get("FREQ", "DAILY").upper()
     interval = max(1, int(by_part.get("INTERVAL", "1")))
     step = FREQ_STEP_SECONDS.get(freq, 86_400) * interval
-    expansion = Expansion(rset, kind, zone, anchor=dtstart, step_seconds=step)
+    expansion = Expansion(rset, kind, zone, anchor=dtstart, step_seconds=step, rule=rule)
     if "COUNT" in by_part:
         expansion.rule_count = int(by_part["COUNT"])
         expansion.count_settles = not recurrence.rdate and not recurrence.exdate
-    expansion.rule_is_endless = (
-        "COUNT" not in by_part
-        and "UNTIL" not in by_part
-        and not recurrence.rdate
-        and not recurrence.exdate
-    )
+    # Endlessness is a property of the RRULE alone. An RDATE adds occurrences
+    # and an EXDATE removes them, but neither gives an infinite rule an end --
+    # so conditioning this on them meant an endless recurrence carrying a single
+    # EXDATE reported itself COMPLETE when it had merely run out of calendar.
+    expansion.rule_is_endless = "COUNT" not in by_part and "UNTIL" not in by_part
     return expansion
 
 
@@ -880,6 +901,19 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
                 exp.ceiling_reached = True
             elif exp.count_settles and steps < (exp.rule_count or 0):
                 exp.ceiling_reached = True
+            elif exp.rule_count is not None and not exp.count_settles:
+                # A COUNT went unmet while an RDATE or EXDATE was also in play,
+                # so the merged total cannot say which caused the shortfall.
+                # It is exactly answerable, though: COUNT bounds the RRULE
+                # alone, so ask the RRULE how many it actually produced. Fewer
+                # than COUNT means the calendar ended; exactly COUNT means an
+                # EXDATE removed the difference.
+                #
+                # An earlier attempt guessed from proximity to year 9999 and was
+                # wrong in both directions -- it fired 99 years early for a
+                # rule with INTERVAL=100, and missed entirely when several
+                # EXDATEs removed the tail.
+                exp.ceiling_reached = exp.rrule_yield_count() < exp.rule_count
             return
         except RecurError:
             raise

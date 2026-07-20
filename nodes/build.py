@@ -11,6 +11,23 @@ from nodes._recur import (
 )
 
 
+def _dedupe(value: str) -> str:
+    """Drop repeated entries from a comma list, preserving first-seen order.
+
+    Purely textual: no parsing, so malformed entries stay intact for check_rule
+    to reject with a message naming the actual problem.
+    """
+    if "," not in value:
+        return value
+    seen, kept = set(), []
+    for item in value.split(","):
+        marker = item.upper()
+        if marker not in seen:
+            seen.add(marker)
+            kept.append(item)
+    return ",".join(kept)
+
+
 def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
     """Assemble an RFC 5545 recurrence rule from its individual parts.
 
@@ -68,9 +85,18 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
             # depending on which node received it.
             raise RecurError("INVALID_RULE", "no rule parts were supplied")
 
-        rule = canonical_rule(parts)
-        check_rule(rule)
-        probe_rule(rule)
+        # Validate BEFORE canonicalizing. Canonicalizing first meant a
+        # malformed BYDAY entry reached the sorter, raised, and was caught by
+        # the catch-all below as INTERNAL -- reporting a plain caller mistake as
+        # a package fault, the exact inverse of what INTERNAL means.
+        # De-duplicate list values before the length check. Measuring the raw
+        # join meant byday=['MO']*700 was refused for exceeding 2048 characters
+        # even though its canonical form is 'BYDAY=MO' -- input that worked
+        # before and is explicitly allowed through by the per-field guard above.
+        raw = ";".join(f"{key}={_dedupe(value)}" for key, value in parts)
+        validated = check_rule(raw)
+        probe_rule(raw)
+        rule = canonical_rule(validated)
     except RecurError as exc:
         return RuleOutput(error={"code": exc.code, "message": exc.message})
     except Exception:
