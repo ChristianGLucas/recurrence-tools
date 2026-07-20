@@ -1322,6 +1322,10 @@ def test_rule_reached_its_count_abstains_when_it_cannot_tell():
     [
         ("99991001T000000", "first walk spends under half the budget"),
         ("99990601T000000", "first walk spends over half -- the silent-wrong-answer band"),
+        # Not a ceiling-logic band: here the FIRST walk stops on the scan
+        # budget, so the ceiling code is never reached and the assertion is
+        # satisfied by budget exhaustion alone. Kept as coverage of that path,
+        # labelled honestly rather than counted as a third band.
         ("99990401T000000", "first walk exhausts the budget outright"),
     ],
 )
@@ -1342,3 +1346,36 @@ def test_a_ceiling_is_reported_in_every_budget_band(dtstart, band):
     assert result.count < 1000
     incomplete = result.truncated or bool(result.error.code)
     assert incomplete, f"claimed complete in the band where {band}"
+
+
+def test_a_caller_s_own_exdates_are_never_reported_as_truncation():
+    """The mirror of the ceiling bug, and the case that makes `None` reachable.
+
+    Trailing EXDATEs decouple the two walks: they shorten the MERGED span, so
+    the first walk finishes cheaply, while the rule-only walk still has to cross
+    the whole span and may not afford it. The check then abstains -- and an
+    abstention folded in with "did not reach its COUNT" reports a complete
+    answer as truncated.
+
+    Ground truth: the RRULE alone produces all 240 occurrences, so the calendar
+    never ran out. The caller excluded 180. Sixty is the complete answer.
+    """
+    base = datetime(9990, 1, 1, 9, 0, 0)
+    excluded = [
+        (base + timedelta(days=day)).strftime("%Y%m%dT%H%M%S")
+        for day in range(60, 240)
+    ]
+    result = count(
+        FakeContext(),
+        CountRequest(
+            recurrence=recurrence(
+                "FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0;COUNT=240",
+                "99900101T000000",
+                exdate=excluded,
+            ),
+            limit=10000,
+        ),
+    )
+    assert result.error.code == "", result.error.message
+    assert result.count == 60
+    assert result.truncated is False, "an EXDATE the caller asked for is not truncation"

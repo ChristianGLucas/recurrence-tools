@@ -803,13 +803,13 @@ class Expansion:
         the caller must not turn "I could not tell" into a claim that the
         calendar cut the answer short.
 
-        It is funded from what the first walk left, which is often not enough,
-        because it re-walks the same span and so costs about what that walk
-        cost. That is fine BECAUSE of the abstention: an underfunded second walk
-        says None and is ignored, rather than being read as truncation. An
-        earlier version gave it a full budget instead -- which bought no
-        different answer on any input tried, and doubled the worst case to 2.4s
-        against a 3s deadline that exists for denial-of-service reasons.
+        It is funded in FULL, not from what the first walk left. It re-walks
+        the same span, so leftovers suffice only when the first walk spent under
+        half the budget -- and in the band above that the question went
+        unanswered while a genuine calendar-end truncation was reported as a
+        complete answer. Full funding roughly doubles the worst case on this
+        path (~2.4s against the 3s deadline); over-run is a structured
+        LIMIT_EXCEEDED, and an honest refusal beats a fast wrong answer.
         """
         if self.rule is None or self.rule_count is None:
             return True
@@ -965,11 +965,14 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
                 # that speed with a wrong answer, and an honest refusal on a
                 # slow host beats a fast lie.
                 reached = exp.rule_reached_its_count(scan_budget)
-                # Three states, and only ONE of them means "complete": a
-                # definite True. False is a ceiling; None is "could not tell",
-                # which must not be reported as completeness either. Collapsing
-                # None in with True is what produced the wrong answer above.
-                exp.ceiling_reached = reached is not True
+                # Only a definite False -- "the rule did NOT reach its COUNT" --
+                # is evidence the calendar ended. None is an abstention and must
+                # stay one: folding it in with False reports a caller's own
+                # EXDATE shortfall as truncation, which is the mirror of the bug
+                # full funding fixes. Trailing EXDATEs make None reachable even
+                # when fully funded, by shortening the merged walk while the
+                # rule-only walk still has to cross the whole span.
+                exp.ceiling_reached = reached is False
             return
         except RecurError:
             raise
