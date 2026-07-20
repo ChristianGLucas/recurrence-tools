@@ -715,46 +715,40 @@ def zone_for(kind: str, tzid: str) -> Optional[tzinfo]:
 REORDER_MARGIN = timedelta(hours=30)
 
 
-def widen(key: datetime, margin: timedelta) -> datetime:
-    """Push a comparison key past its target by the reorder margin, saturating.
+def widen(key: int, margin: timedelta) -> int:
+    """Push a comparison key past its target by the reorder margin."""
+    return key + int(margin.total_seconds() * 1_000_000)
 
-    datetime arithmetic raises OverflowError rather than clamping, so adding the
-    margin to a key near the end of the representable calendar crashed on input
-    that was entirely valid -- a window ending in the final 30 hours of year
-    9999. There is nothing beyond the ceiling to look for, so saturating there
-    is both safe and the right answer.
+
+def cmp_key(dt: datetime) -> int:
+    """A total-ordering comparison key: microseconds since the proleptic epoch.
+
+    Not a datetime. Two earlier attempts used one and both failed at the edges
+    of the representable calendar: converting to UTC raised OverflowError for a
+    year-0001 instant in a positive-offset zone, and saturating that overflow to
+    datetime.min/max collapsed every instant in the band onto a single sentinel
+    -- so Contains answered True for non-occurrences and Between rejected valid
+    windows claiming `end` was not after `start`. A crash traded for a wrong
+    answer.
+
+    An integer has neither failure: it cannot overflow, and no two distinct
+    instants share a value. It also settles PEP 495 -- on a fall-back day a
+    local time occurs twice, and comparing zone-local values directly returns
+    False for ==, > AND < at once. Subtracting the offset resolves both
+    occurrences to the distinct instants they actually are.
     """
-    try:
-        return key + margin
-    except OverflowError:
-        return key.max.replace(tzinfo=key.tzinfo)
-
-
-def cmp_key(dt: datetime) -> datetime:
-    """A comparison key that survives PEP 495 fold semantics.
-
-    On a fall-back day a local time occurs twice, and Python marks such an
-    instant "fold-affected". Comparing one against an equal instant in another
-    zone returns False for ==, > AND < simultaneously -- it is neither equal nor
-    ordered. Comparing zone-local values directly therefore makes an occurrence
-    vanish from an equality test while still passing a range test, which is how
-    Contains and Between came to disagree about the same instant.
-
-    Normalising to UTC first removes the ambiguity, because a UTC instant is
-    never fold-affected.
-    """
-    if dt.tzinfo is None:
-        return dt
-    try:
-        return dt.astimezone(timezone.utc)
-    except OverflowError:
-        # A zoned instant whose UTC equivalent falls outside year 1..9999 --
-        # year 0001 in any positive-offset zone, the last hours of 9999 in any
-        # negative one. Expand emits these happily (it never compares), so
-        # crashing here made three nodes reject occurrences their sibling had
-        # just produced. Saturate in the direction of the overflow.
-        edge = datetime.min if dt.year <= 1 else datetime.max
-        return edge.replace(tzinfo=timezone.utc)
+    naive = dt.replace(tzinfo=None)
+    micros = (
+        naive.toordinal() * 86_400_000_000
+        + naive.hour * 3_600_000_000
+        + naive.minute * 60_000_000
+        + naive.second * 1_000_000
+        + naive.microsecond
+    )
+    offset = dt.utcoffset()
+    if offset is not None:
+        micros -= int(offset.total_seconds() * 1_000_000)
+    return micros
 
 
 def localize(dt: datetime, zone: Optional[tzinfo]) -> datetime:

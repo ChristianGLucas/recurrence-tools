@@ -1410,6 +1410,16 @@ def test_year_one_in_a_positive_offset_zone_is_comparable(zone):
         assert member.error.code == "", f"{zone}/{emitted}: {member.error.message}"
         assert member.contains is True
 
+    # The NEGATIVE half, without which this test is satisfied BY the bug it
+    # guards: saturating overflowing instants to one sentinel made everything in
+    # the band compare equal, so `contains` was True unconditionally.
+    for near_miss in ("00010101T003000", "00010101T081500"):
+        stray = contains(
+            FakeContext(), ContainsRequest(recurrence=rec(), candidate=near_miss)
+        )
+        assert stray.error.code == "", f"{zone}/{near_miss}: {stray.error.message}"
+        assert stray.contains is False, f"{zone}: {near_miss} is not an occurrence"
+
 
 def test_the_last_hours_of_the_calendar_in_a_negative_offset_zone():
     result = between(
@@ -1423,6 +1433,32 @@ def test_the_last_hours_of_the_calendar_in_a_negative_offset_zone():
     )
     assert result.error.code == "", result.error.message
     assert result.count == 6
+
+
+def test_both_window_endpoints_inside_the_overflow_band():
+    """The case the window test above never reached: its start does not
+    overflow. With both endpoints saturated to the same sentinel, `end > start`
+    came out false and a plainly valid window was rejected as inverted."""
+    rec = lambda: recurrence("FREQ=HOURLY;COUNT=3", "99991231T210000", tzid=NY)
+    window = between(
+        FakeContext(),
+        BetweenRequest(
+            recurrence=rec(), start="99991231T210000", end="99991231T235959", limit=10
+        ),
+    )
+    assert window.error.code == "", window.error.message
+    assert list(window.occurrences) == [
+        "99991231T210000",
+        "99991231T220000",
+        "99991231T230000",
+    ]
+
+    # And ordering must survive in the band: a non-occurrence is still not one.
+    for near_miss in ("99991231T213000", "99991231T224500", "99991231T235959"):
+        stray = contains(
+            FakeContext(), ContainsRequest(recurrence=rec(), candidate=near_miss)
+        )
+        assert stray.contains is False, f"{near_miss} is not an occurrence"
 
 
 # --- tzid: refuse host-dependent ids, not every short one -------------------
