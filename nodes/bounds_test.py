@@ -883,12 +883,22 @@ def test_count_flags_a_budget_stopped_count_as_truncated():
     assert result.truncated is True
 
 
-def test_the_wall_clock_deadline_is_short_enough_to_bound_a_request():
-    """Pins the VALUE, not just the mechanism. A test that shrinks the deadline
-    proves the kill path works but would still pass if the shipped constant were
-    two minutes."""
-    assert 0 < _recur.SCAN_TIMEOUT_SECONDS <= 5.0
+def test_the_deadline_is_finite_and_well_clear_of_real_work():
+    """The bound exists to catch a HANG, not to police slowness.
+
+    A rule that matches nothing scans inside a single library call where no
+    deadline this code could check would fire, so the process must be killable.
+    That requires the timeout to be finite -- but nothing more. Sizing it
+    tightly (it was 5s) refused ordinary rules whenever container start-up ate
+    the budget, so it is now far above the slowest measured expansion (~2.6s)
+    and only ever trips on a genuine infinite scan.
+    """
+    assert 0 < _recur.SCAN_TIMEOUT_SECONDS <= 120.0
+    assert _recur.SCAN_TIMEOUT_SECONDS >= 10.0, "too tight to survive a slow host"
     assert _recur.REAP_TIMEOUT_SECONDS <= 1.0
+    # Startup is waited for separately and generously: exceeding it means the
+    # PLATFORM failed to provide a worker, which no rule change can fix.
+    assert _recur.STARTUP_TIMEOUT_SECONDS >= _recur.SCAN_TIMEOUT_SECONDS
 
 
 def test_an_ambiguous_local_anchor_resolves_to_the_first_instant():

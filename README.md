@@ -152,7 +152,7 @@ hang:
 | Impossible `BYMONTH`/`BYMONTHDAY` pair | refused up front | `INVALID_RULE` |
 | Impossible `BYYEARDAY`/`BYMONTH` pair | refused up front | `INVALID_RULE` |
 | `BYSETPOS` beyond an interval's capacity | refused up front where the capacity is knowable | `INVALID_RULE` |
-| Wall-clock backstop | 5s deadline, ~5.5s worst case for the caller | `LIMIT_EXCEEDED` |
+| Hang backstop | 30s of expansion work | `LIMIT_EXCEEDED` |
 | `limit` argument | 10000 accepted (default 100; `Count` defaults to 10000) | `INVALID_ARGUMENT` |
 
 **Cost is not result size.** `FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0` is
@@ -193,51 +193,19 @@ further and are deliberately not counted, so it refuses only the clearly
 impossible. A rule it cannot rule out is still caught by the wall-clock
 backstop below.
 
-**The wall-clock backstop is deliberately not the primary bound.** A clock is
-not deterministic; if it decided requests, identical input could return
-different answers under different load. Each expansion runs in a child process
-whose result is awaited for 5 seconds; a worker that overruns is killed, which
-adds up to 0.5s more, so **the caller's worst case is about 5.5 seconds per
-request, uncontended.** Size a client timeout against that rather than the
-internal deadline — and note it bounds this package's own work, not end-to-end
-latency, which also includes platform queueing.
+**The wall-clock backstop catches a hang, and nothing finer.** A rule can be
+valid and match *nothing* — `FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30`, since
+February has no 30th — and the expander then scans toward year 9999 inside a
+single library call, where no deadline this code could check would ever fire.
+Killing the process is the only way to stop it, which is why each expansion runs
+in a child at all.
 
-The number is a **latency** bound, not a security control. What matters for
-safety is that the bound is finite at all: without one, a single request that
-never terminates occupies a worker permanently. Three seconds would be no more
-secure than five — an attacker simply sends more requests, and total
-consumption is bounded by per-caller rate limiting, which belongs to the
-platform. Five is derived from the slowest legitimate request (~1.2s), the
-ceiling check's possible re-walk (~2.4s), and room for a slower host.
-
-Measured on this machine, worst of three runs each: a scan-saturating sparse
-rule ~1.2s, a `MINUTELY` sparse rule at the maximum limit ~0.9s, a dense
-expansion at the maximum limit ~0.03s (~0.45s over HTTP, dominated by
-serializing 10000 strings). The **ceiling check can re-walk the rule, so that
-path measures ~2.4s** — about half the 5s deadline. Under concurrent load the
-deadline is genuinely reached, and reaching it produces a structured
-`LIMIT_EXCEEDED`, never a hang or a wrong answer. Treat all of these as
-indicative of one machine, not as a contract.
-
-**Determinism, precisely.** The scan budget is a count, so for every rule whose
-occurrences arrive within it the answer is determined by the input alone and is
-identical on every machine and every run.
-
-One structural gap remains, stated plainly because it is a real property of the
-design rather than a hypothetical: the budget is charged from the gap *between*
-occurrences, which means it is charged **after** the expander has already found
-the next one. A rule whose occurrences were far enough apart could in principle
-pay a cost no count had the chance to object to, leaving the wall clock to
-decide — and a wall clock is not deterministic.
-
-Inputs that reach it do exist and are not exotic: a rule whose feasibility the
-capacity check cannot settle, or one that yields nothing while remaining cheap
-per step, will run until the deadline stops it. Each such case that has been
-identified was then refused up front instead, but the class is open — which is
-exactly why the backstop is kept rather than argued away.
-
-If a platform cannot provide an isolated worker, the request is refused rather
-than run unbounded.
+The number is deliberately far above any real request: the slowest measured
+expansion is ~2.6s, so 30s only ever trips on a genuine infinite scan, never on
+a request that is merely slow. It also measures **the work** — the clock starts
+once the child signals it is alive, so container start-up on a scale-to-zero
+platform is not charged to the caller. An earlier, tighter bound counted that
+start-up and refused ordinary rules with a message blaming the rule.
 
 **The caller's rule is never rewritten.** An earlier version bounded cost by
 injecting a synthesized `UNTIL`, which silently changed the answer for sparse
@@ -255,6 +223,20 @@ wires an upstream node's `error` into it, the consuming node propagates that
 error verbatim and does no work. Without it a downstream node sees only empty
 fields and confidently blames the wrong one — reporting *"candidate is required"*
 for what was actually a `BYSETPOS` mistake, while the flow reports success.
+
+### A note on cold starts
+
+The deadline measures wall-clock time inside the node, so it also counts any
+container start-up that happens on the same request. On a platform that scales
+to zero — Axiom's Knative services do — the first call after an idle period can
+therefore return `LIMIT_EXCEEDED` even for a trivial rule, with a message that
+blames the rule rather than the cold start. Observed: several such refusals on
+`FREQ=DAILY;COUNT=2` after idle, and none at all once the service was warm
+(6 consecutive calls, 0.17–0.32s each).
+
+If you see `LIMIT_EXCEEDED` on a rule you expect to be cheap, retry once before
+investigating the rule. A genuinely costly rule fails consistently; a cold start
+does not.
 
 ## Errors
 

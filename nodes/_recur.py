@@ -1068,22 +1068,31 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
 # deadline this code could check would ever fire. Killing the process is the
 # only way to stop it, which is why expansion runs in a child at all.
 #
-# What the NUMBER is for: latency, not security. The security-relevant property
-# is finite-versus-infinite -- without any bound one request occupies a worker
-# forever and the pool never recovers; with any finite bound workers are
-# reclaimed. Three seconds is no more "secure" than ten: an attacker sends more
-# requests, and total consumption is bounded by per-caller rate limiting, which
-# is the platform's job and not something this package can do.
+# What the NUMBER is for: catching a hang, nothing finer. The security-relevant
+# property is finite-versus-infinite -- without any bound one request occupies a
+# worker forever and the pool never recovers. Thirty seconds is no more or less
+# "secure" than five: an attacker sends more requests either way, and total
+# consumption is bounded by per-caller rate limiting, which is the platform's
+# job and not something this package can do.
 #
-# So it is derived from latency: the slowest legitimate request measures ~1.2s,
-# the ceiling check can re-walk the rule for ~2.4s, and a slower host doubles
-# that. Five seconds leaves real headroom.
+# It is deliberately far above any real request. The slowest legitimate
+# expansion measured ~2.6s, so 30s only ever trips on a genuine infinite scan --
+# never on a request that is merely slow. A tight bound bought nothing and cost
+# real answers: at 5s, ordinary rules were being refused with a message blaming
+# the caller's rule when the truth was a cold container.
 #
-# It was briefly lowered to 3s in response to a review that measured the CPU a
-# small request can buy -- but that review explicitly said no change was
-# required and to rate-limit at the platform instead. Tightening it anyway
-# removed the margin and broke the build on a host only twice as slow.
-SCAN_TIMEOUT_SECONDS = 5.0
+# And it now measures the WORK. The clock starts once the child signals it is
+# alive, so process start, interpreter warm-up and imports are no longer charged
+# to the caller. That, not the size of the number, was what made trivial rules
+# fail on the first request after an idle period.
+SCAN_TIMEOUT_SECONDS = 30.0
+
+# How long to wait for the child to signal it is alive. This covers process
+# start, interpreter warm-up and imports -- on a scale-to-zero platform, an
+# entire container start. It is generous because exceeding it means the
+# PLATFORM failed to give us a worker, which is not something the caller's rule
+# can cause and not something they can fix by changing it.
+STARTUP_TIMEOUT_SECONDS = 120.0
 
 # How long reaping a killed worker may add on top. Kept small deliberately: the
 # caller's worst case is SCAN_TIMEOUT_SECONDS + this, and that total is the
@@ -1095,7 +1104,12 @@ def _isolated_entry(module_name: str, data: bytes, queue) -> None:
     import importlib
 
     try:
-        queue.put(("ok", importlib.import_module(module_name).compute(data)))
+        node = importlib.import_module(module_name)
+        # Announce readiness first. Everything before this point -- process
+        # start, interpreter warm-up, imports -- is start-up cost, not the
+        # caller's rule, and the deadline must not charge them for it.
+        queue.put(("ready",))
+        queue.put(("ok", node.compute(data)))
     except RecurError as exc:
         queue.put(("err", exc.code, exc.message))
     except Exception as exc:  # pragma: no cover - defence in depth
@@ -1156,7 +1170,15 @@ def isolate(module_name: str, input_msg):
     proc.start()
     try:
         try:
-            result = channel.get(timeout=SCAN_TIMEOUT_SECONDS)
+            # Wait for the child to say it is alive, with no deadline. On a
+            # scale-to-zero platform this covers container start, and charging
+            # it to the caller made a trivial rule fail on the first request
+            # after an idle period -- with a message blaming the rule.
+            first = channel.get(timeout=STARTUP_TIMEOUT_SECONDS)
+            if first[0] == "ready":
+                result = channel.get(timeout=SCAN_TIMEOUT_SECONDS)
+            else:
+                result = first
         except queue_module.Empty:
             return None, {
                 "code": "LIMIT_EXCEEDED",
