@@ -46,10 +46,15 @@ def test_truncated_is_conservative_when_the_limit_is_reached_exactly():
     reporting truncation is the safe direction -- the caller can ask for more
     and get nothing, which costs them nothing.
     """
+    # With a bare COUNT rule the total is known for free, so this IS exact.
     r = run("FREQ=DAILY;COUNT=3", "20260101T000000", limit=3)
     assert r.count == 3
     assert list(r.occurrences)[-1] == "20260103T000000"
-    assert r.truncated is True
+    assert r.truncated is False
+
+    # With no COUNT to settle it, reaching the limit means "may be more".
+    r = run("FREQ=DAILY", "20260101T000000", limit=3)
+    assert r.count == 3 and r.truncated is True
 
     # Below the limit it is exact, because collection ran to genuine exhaustion.
     r = run("FREQ=DAILY;COUNT=3", "20260101T000000", limit=10)

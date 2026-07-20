@@ -172,3 +172,64 @@ def test_date_anchor_yields_date_form():
         "19970903",
         "19970904",
     ]
+
+
+# RFC 5545 p.128 -- "An example where the days generated makes a difference
+# because of WKST". The RFC prints BOTH results to show WKST changes the answer,
+# which makes it a rare self-contained oracle for a part that is easy to ignore.
+#
+#   DTSTART;TZID=America/New_York:19970805T090000
+#   RRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=4;BYDAY=TU,SU;WKST=MO
+#   ==> (1997 EDT) August 5,10,19,24
+def test_rfc_wkst_monday():
+    assert first_n(
+        "FREQ=WEEKLY;INTERVAL=2;COUNT=4;BYDAY=TU,SU;WKST=MO", "19970805T090000", 10
+    ) == [
+        "19970805T090000",
+        "19970810T090000",
+        "19970819T090000",
+        "19970824T090000",
+    ]
+
+
+# Same rule with WKST=SU -- the RFC's point is that this yields DIFFERENT dates.
+#   ==> (1997 EDT) August 5,17,19,31
+def test_rfc_wkst_sunday_changes_the_answer():
+    monday = first_n(
+        "FREQ=WEEKLY;INTERVAL=2;COUNT=4;BYDAY=TU,SU;WKST=MO", "19970805T090000", 10
+    )
+    sunday = first_n(
+        "FREQ=WEEKLY;INTERVAL=2;COUNT=4;BYDAY=TU,SU;WKST=SU", "19970805T090000", 10
+    )
+    assert sunday == [
+        "19970805T090000",
+        "19970817T090000",
+        "19970819T090000",
+        "19970831T090000",
+    ]
+    assert sunday != monday, "WKST must change the answer, per the RFC's own example"
+
+
+# RFC 5545 p.127 -- "Monday of week number 20 (where the default start of the
+# week is Monday), forever"
+#   DTSTART;TZID=America/New_York:19970512T090000
+#   RRULE:FREQ=YEARLY;BYWEEKNO=20;BYDAY=MO
+#   ==> (1997 9:00 AM EDT) May 12  (1998 EDT) May 11  (1999 EDT) May 17
+def test_rfc_byweekno_monday_of_week_20():
+    assert first_n("FREQ=YEARLY;BYWEEKNO=20;BYDAY=MO", "19970512T090000", 3) == [
+        "19970512T090000",
+        "19980511T090000",
+        "19990517T090000",
+    ]
+
+
+# RFC 5545 p.127 -- "Every 20th Monday of the year, forever"
+#   DTSTART;TZID=America/New_York:19970519T090000
+#   RRULE:FREQ=YEARLY;BYDAY=20MO
+#   ==> (1997 9:00 AM EDT) May 19  (1998 EDT) May 18  (1999 EDT) May 17
+def test_rfc_twentieth_monday_of_the_year():
+    assert first_n("FREQ=YEARLY;BYDAY=20MO", "19970519T090000", 3) == [
+        "19970519T090000",
+        "19980518T090000",
+        "19990517T090000",
+    ]

@@ -68,6 +68,10 @@ FREQ_STEP_SECONDS = {
     "YEARLY": 31_622_400,   # 366 days
 }
 
+# The last representable year. A recurrence running past it stops because the
+# calendar ended, not because the rule did -- a distinction callers must be told.
+MAX_YEAR = 9999
+
 FREQS = ("SECONDLY", "MINUTELY", "HOURLY", "DAILY", "WEEKLY", "MONTHLY", "YEARLY")
 WEEKDAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
 
@@ -490,8 +494,14 @@ def _split_parts(rule: str) -> List[Tuple[str, str]]:
 
 
 def canonical_rule(parts: Iterable[Tuple[str, str]]) -> str:
-    """Re-serialize validated parts in this package's canonical order."""
-    by_key = {k: v for k, v in parts}
+    """Re-serialize validated parts in this package's canonical order.
+
+    INTERVAL=1 is dropped: it is the RFC default, so stating it and omitting it
+    are the same rule, and a canonical form that distinguishes them cannot serve
+    as an equality key. Parse still reports it, because Parse's job is to
+    describe the text it was given.
+    """
+    by_key = {k: v for k, v in parts if not (k == "INTERVAL" and v.strip() == "1")}
     ordered = [k for k in CANONICAL_ORDER if k in by_key]
     return ";".join(f"{k}={_canonical_value(k, by_key[k])}" for k in ordered)
 
@@ -607,18 +617,22 @@ def zone_for(kind: str, tzid: str) -> Optional[tzinfo]:
 
 # How far an occurrence can move relative to its neighbours when a zone shifts.
 #
-# Occurrences arrive in LOCAL order, but comparisons happen in UTC, and a
-# spring-forward gap breaks the correspondence: in New York a rule firing at
-# 02:00, 02:30, 03:00 and 03:30 local on a transition day maps to 07:00Z,
-# 07:30Z, 07:00Z, 07:30Z -- the third instant goes BACKWARDS in UTC. Any search
-# that stops the moment it passes its target would stop one occurrence too
-# early and silently lose a real one.
+# Occurrences arrive in LOCAL order but are compared in UTC, and a zone change
+# breaks the correspondence: in New York a rule firing at 02:00, 02:30, 03:00
+# and 03:30 local on a spring-forward day maps to 07:00Z, 07:30Z, 07:00Z and
+# 07:30Z -- the third instant goes BACKWARDS in UTC. A search that stopped the
+# moment it passed its target would stop one occurrence too early and lose a
+# real one.
 #
-# The displacement is bounded by the size of the shift (never more than a couple
-# of hours anywhere in the tz database), so every early break carries this
-# margin: keep looking a little past the target before concluding there is
-# nothing more.
-REORDER_MARGIN = timedelta(hours=3)
+# The margin is DERIVED, not guessed. UTC offsets in the tz database span
+# UTC-12:00 to UTC+14:00, a range of 26 hours, so two instants' offsets can
+# differ by at most that -- and a later-in-local occurrence can therefore be at
+# most 26 hours earlier in UTC. An earlier version used 3 hours, reasoning from
+# ordinary DST shifts; that is wrong, because the database also contains
+# dateline moves. Pacific/Apia skipped 2011-12-30 entirely, displacing
+# occurrences by ~23 hours, and Contains then denied an occurrence Expand had
+# just emitted. 30 hours clears the real bound with margin to spare.
+REORDER_MARGIN = timedelta(hours=30)
 
 
 def cmp_key(dt: datetime) -> datetime:
@@ -706,6 +720,15 @@ class Expansion:
         # Set by walk() when the scan budget stopped it. Distinguishes "no more
         # occurrences" from "stopped counting", which callers report differently.
         self.budget_exhausted = False
+        # Set when the walk ended because the calendar ran out rather than the
+        # recurrence did -- occurrences past year 9999 are not representable, so
+        # a COUNT can go unsatisfied with no budget having been exceeded.
+        self.ceiling_reached = False
+        # The rule's own COUNT, when it states one. Knowing it makes `truncated`
+        # exact in the common case, for free -- but only when the recurrence is
+        # the RRULE alone (see take()).
+        self.rule_count = None
+        self.count_settles = False
 
     def format(self, dt: datetime) -> str:
         return format_instant(dt, self.kind, self.zone)
@@ -765,7 +788,11 @@ def build(recurrence) -> Expansion:
     freq = by_part.get("FREQ", "DAILY").upper()
     interval = max(1, int(by_part.get("INTERVAL", "1")))
     step = FREQ_STEP_SECONDS.get(freq, 86_400) * interval
-    return Expansion(rset, kind, zone, anchor=dtstart, step_seconds=step)
+    expansion = Expansion(rset, kind, zone, anchor=dtstart, step_seconds=step)
+    if "COUNT" in by_part:
+        expansion.rule_count = int(by_part["COUNT"])
+        expansion.count_settles = not recurrence.rdate and not recurrence.exdate
+    return expansion
 
 
 def walk(exp: Expansion, budget: int = MAX_STEPS,
@@ -785,7 +812,9 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
     steps = 0
     scanned = 0.0
     previous = exp.anchor
+    last = None
     exp.budget_exhausted = False
+    exp.ceiling_reached = False
     iterator = iter(exp.rset)
     while True:
         # Failures inside the expander surface HERE, on iteration, not when the
@@ -797,6 +826,11 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
         try:
             dt = next(iterator)
         except StopIteration:
+            if last is not None and last.year >= MAX_YEAR:
+                # The expander stopped because there is no representable year
+                # beyond this, not because the rule ran out. A caller must not
+                # read the short list as an exact answer.
+                exp.ceiling_reached = True
             return
         except RecurError:
             raise
@@ -813,6 +847,7 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
             if gap > 0:
                 scanned += gap / exp.step_seconds
         previous = dt
+        last = dt
         if scanned > scan_budget:
             exp.budget_exhausted = True
             return
@@ -979,6 +1014,15 @@ def take(exp: Expansion, limit: int) -> Tuple[List[str], bool]:
     out: List[str] = []
     for dt in walk(exp):
         out.append(exp.format(dt))
+        if exp.count_settles and len(out) >= exp.rule_count:
+            # The rule states its own total and we have reached it, so there is
+            # nothing further -- known for free, without fetching anything.
+            #
+            # Only valid when the recurrence is the RRULE alone: COUNT bounds the
+            # RRULE's occurrences, NOT the merged set. With an RDATE the set is
+            # larger than COUNT, and with an EXDATE it is smaller, so in either
+            # case COUNT settles nothing.
+            return out, False
         if len(out) == limit:
             # Stop HERE rather than looping once more to discover whether another
             # occurrence exists. That extra pull is unbounded: for a rule whose
@@ -986,4 +1030,4 @@ def take(exp: Expansion, limit: int) -> Tuple[List[str], bool]:
             # the answer the caller actually asked for. `truncated` therefore
             # means "collection stopped early, more may exist", not "more exist".
             return out, True
-    return out, exp.budget_exhausted
+    return out, exp.budget_exhausted or exp.ceiling_reached

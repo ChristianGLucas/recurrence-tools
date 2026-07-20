@@ -176,20 +176,30 @@ whose result is awaited for 3 seconds; a worker that overruns is killed, which
 adds up to 0.5s more, so **the caller's worst case is about 3.5 seconds** — that
 is the number to size a client timeout against, not the internal 3s deadline.
 
-Measured on this machine: the scan-budget-saturating example above takes ~1.2s,
-a rule with a decades-wide gap between occurrences ~2.0s, a dense expansion at
-the maximum limit ~0.03s. So the backstop has under 2× headroom over the slowest
-legitimate request, not a comfortable margin.
+Measured on this machine, worst of three runs each: the scan-saturating sparse
+rule above ~1.2s, a `MINUTELY` sparse rule at the maximum limit ~0.9s, a dense
+expansion at the maximum limit ~0.03s. **Worst observed across every case
+tried: ~1.2s**, against a 3s deadline — roughly 2.5× headroom. Treat these as
+indicative of one machine, not as a contract.
 
-**Determinism, precisely.** The scan budget is a count, so for rules whose
+**Determinism, precisely.** The scan budget is a count, so for every rule whose
 occurrences arrive within it the answer is determined by the input alone and is
-identical on every machine. That is *not* a guarantee for every rule. The budget
-is charged from the gap between occurrences, which means it is charged **after**
-the expander has already found the next one — so a rule with a very large gap
-pays the cost before any count can object, and the outcome is then decided by
-the wall clock. A rule whose occurrences are decades apart can therefore return
-an answer on a fast host and `LIMIT_EXCEEDED` on a slow one. Such inputs are
-constructible; they are pathological, but they are not hypothetical.
+identical on every machine and every run.
+
+One structural gap remains, stated plainly because it is a real property of the
+design rather than a hypothetical: the budget is charged from the gap *between*
+occurrences, which means it is charged **after** the expander has already found
+the next one. A rule whose occurrences were far enough apart could in principle
+pay a cost no count had the chance to object to, leaving the wall clock to
+decide — and a wall clock is not deterministic.
+
+In practice no such input has been found. Three independent reviewers and the
+author each tried to construct one and could not: the expander skips whole days
+when `BYMONTH`/`BYMONTHDAY` narrow a rule, so wide gaps are far cheaper to cross
+than their span suggests, and the feasibility checks refuse the impossible rules
+outright. The backstop has never been observed to fire on any input that was not
+deliberately given a shortened deadline. It is kept because "not found" is not
+the same as "cannot exist".
 
 If a platform cannot provide an isolated worker, the request is refused rather
 than run unbounded.

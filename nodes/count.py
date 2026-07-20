@@ -17,6 +17,12 @@ def _compute(ax: AxiomContext, input: CountRequest) -> OccurrenceCount:
                 break
             total += 1
         truncated = truncated or exp.budget_exhausted
+        if total == 0 and exp.budget_exhausted:
+            raise RecurError(
+                "LIMIT_EXCEEDED",
+                "the scan budget ran out before finding any occurrence; "
+                "narrow the rule or move dtstart closer to the occurrences",
+            )
     except RecurError as exc:
         ax.log.info("count rejected input", code=exc.code)
         return OccurrenceCount(error={"code": exc.code, "message": exc.message})

@@ -101,15 +101,52 @@ def test_an_impossible_month_day_pair_is_refused_immediately(rule):
     ],
 )
 def test_rare_but_possible_rules_are_answered_not_refused(rule):
-    """The feasibility check must not over-reach into merely-infrequent rules."""
+    """The feasibility check must not over-reach into merely-infrequent rules.
+
+    Asserting only "no error" would be a rubber stamp: a zero-occurrence success
+    would satisfy it while the node was in fact answering nothing. The property
+    that matters is that the rule is not REFUSED as impossible -- it may still
+    be too costly to reach, which is a different and honestly-reported outcome.
+    """
     result, elapsed = timed(
         lambda: count(
             FakeContext(),
             CountRequest(recurrence=recurrence(rule, "20200101T000000"), limit=1),
         )
     )
-    assert result.error.code == "", result.error.message
     assert elapsed < CEILING, f"took {elapsed:.1f}s"
+    assert result.error.code != "INVALID_RULE", (
+        f"a possible rule was refused as impossible: {result.error.message}"
+    )
+    if result.error.code == "":
+        assert result.count > 0, "a successful answer must contain an occurrence"
+    else:
+        assert result.error.code == "LIMIT_EXCEEDED", result
+
+
+def test_finding_nothing_within_budget_is_reported_not_returned_as_empty():
+    """Zero occurrences plus an unfinished search is no answer, not a partial one.
+
+    Expand and Count previously returned count=0 with truncated=true and no
+    error for rules that genuinely occur -- which reads as "this rule never
+    fires" -- while NextOccurrence and Contains reported the same situation as
+    LIMIT_EXCEEDED. Same envelope, opposite stories.
+    """
+    rule = "FREQ=SECONDLY;BYYEARDAY=366;BYHOUR=3"
+    for result in (
+        expand(
+            FakeContext(),
+            ExpandRequest(
+                recurrence=recurrence(rule, "20200101T000000"), limit=10
+            ),
+        ),
+        count(
+            FakeContext(),
+            CountRequest(recurrence=recurrence(rule, "20200101T000000"), limit=1),
+        ),
+    ):
+        assert result.error.code == "LIMIT_EXCEEDED", result
+        assert result.count == 0
 
 
 def test_the_never_matching_rule_is_bounded_on_every_expansion_node():
@@ -488,10 +525,12 @@ def test_oversized_repeated_fields_are_refused_before_being_built():
 def test_the_wall_clock_backstop_actually_fires(monkeypatch):
     """The backstop was the least-tested bound and the most-claimed one.
 
-    It cannot be triggered by any real input any more -- the deterministic scan
-    budget and the feasibility check reach every case first, which is the point
-    -- so it is exercised by shrinking the deadline instead. Otherwise the
-    package's most emphasised safety mechanism would be entirely unverified.
+    No input has been found that reaches it: the deterministic scan budget and
+    the feasibility checks get there first, which is the point. That is exactly
+    why it is exercised by shrinking the deadline -- otherwise the package's most
+    emphasised safety mechanism would be entirely unverified. "No input found"
+    is not "no input exists", so the backstop stays and this test keeps it
+    honest.
     """
     monkeypatch.setattr(_recur, "SCAN_TIMEOUT_SECONDS", 0.05)
     result, elapsed = timed(
@@ -532,13 +571,40 @@ def test_the_backstop_leaves_no_child_behind(monkeypatch):
 # completely.
 
 REORDERING_CASES = [
-    # zone, rule, dtstart -- each crosses a spring-forward transition
+    # zone, rule, dtstart -- each crosses an offset change.
+    #
+    # The first five are ordinary DST shifts of 60 minutes or less. Calibrating
+    # ONLY on those is how a 3-hour margin looked sufficient: every case sat
+    # comfortably inside it, so the test could not fail for any zone the margin
+    # did not already handle. The dateline cases below are the ones that matter
+    # -- Pacific/Apia skipped 2011-12-30 entirely and Pacific/Kiritimati skipped
+    # 1994-12-31, displacing occurrences by ~23 hours.
     ("Australia/Lord_Howe", "FREQ=MINUTELY;INTERVAL=20", "20261004T020000"),  # 30-min shift
     ("Pacific/Chatham", "FREQ=MINUTELY;INTERVAL=20", "20260927T020000"),      # 45-min offset
     ("America/Santiago", "FREQ=MINUTELY;INTERVAL=25", "20260906T230000"),
     ("America/New_York", "FREQ=DAILY;BYHOUR=2,3;BYMINUTE=0,30;BYSECOND=0", "20260308T020000"),
     ("Europe/Dublin", "FREQ=MINUTELY;INTERVAL=20", "20260329T003000"),
+    ("Antarctica/Troll", "FREQ=MINUTELY;INTERVAL=25", "20260329T000000"),     # 2-hour shift
+    ("Pacific/Apia", "FREQ=HOURLY", "20111230T200000"),                       # ~23h dateline move
+    ("Pacific/Apia", "FREQ=MINUTELY;INTERVAL=25", "20111230T220000"),
+    ("Pacific/Kiritimati", "FREQ=HOURLY", "19941230T200000"),                 # ~24h dateline move
+    ("America/Juneau", "FREQ=HOURLY", "18671018T000000"),                     # Alaska purchase
+    ("Antarctica/Vostok", "FREQ=HOURLY;INTERVAL=3", "19941031T000000"),       # +7h jump
+    ("Antarctica/Macquarie", "FREQ=HOURLY;INTERVAL=6", "19480324T000000"),    # +10h jump
+    ("Pacific/Kwajalein", "FREQ=HOURLY", "19930821T000000"),                  # ~24h dateline
 ]
+
+
+def test_the_reorder_margin_exceeds_the_worst_offset_change_possible():
+    """The margin is derived, not guessed.
+
+    UTC offsets in the tz database span UTC-12:00 to UTC+14:00, so two instants'
+    offsets differ by at most 26 hours and a later-in-local occurrence can be at
+    most that much earlier in UTC. An earlier version used 3 hours, reasoning
+    from ordinary DST shifts -- which is exactly the assumption the dateline
+    cases above violate.
+    """
+    assert _recur.REORDER_MARGIN >= timedelta(hours=26)
 
 
 def _utc_form(local_text, zone):
@@ -608,8 +674,13 @@ def test_next_occurrence_returns_the_earliest_not_the_first_seen(zone, rule, dts
     keys = sorted((_utc_form(o, zone), o) for o in expanded.occurrences)
     earliest_utc, earliest_local = keys[0]
 
-    # Ask for the next occurrence strictly after one second before the earliest.
-    before = earliest_utc[:-3] + "00Z" if earliest_utc.endswith("00Z") else earliest_utc
+    # One second before the earliest, computed rather than string-sliced. The
+    # previous expression was a no-op -- replacing the last three characters of
+    # a string already ending "00Z" with "00Z" yields the same string -- so the
+    # boundary this test is named for was never actually exercised.
+    before = (
+        datetime.strptime(earliest_utc, "%Y%m%dT%H%M%SZ") - timedelta(seconds=1)
+    ).strftime("%Y%m%dT%H%M%SZ")
     result = next_occurrence(
         FakeContext(), NextRequest(recurrence=rec(), after=before)
     )

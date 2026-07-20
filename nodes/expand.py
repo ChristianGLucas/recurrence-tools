@@ -8,7 +8,18 @@ from nodes._recur import RecurError, build, effective_limit, take
 def _compute(ax: AxiomContext, input: ExpandRequest) -> OccurrenceList:
     try:
         limit = effective_limit(input.limit)
-        occurrences, truncated = take(build(input.recurrence), limit)
+        exp = build(input.recurrence)
+        occurrences, truncated = take(exp, limit)
+        if not occurrences and exp.budget_exhausted:
+            # Nothing was found AND the search stopped early, so "no
+            # occurrences" was never established. An empty success reads as a
+            # finding; the sibling nodes already report this case rather than
+            # implying one.
+            raise RecurError(
+                "LIMIT_EXCEEDED",
+                "the scan budget ran out before finding any occurrence; "
+                "narrow the rule or move dtstart closer to the occurrences",
+            )
     except RecurError as exc:
         ax.log.info("expand rejected input", code=exc.code)
         return OccurrenceList(error={"code": exc.code, "message": exc.message})
