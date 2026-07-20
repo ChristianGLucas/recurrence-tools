@@ -85,6 +85,13 @@ CANONICAL_ORDER = (
 # rather than reporting the mistake. Range-checked here so a typo surfaces as an
 # error instead of as "this rule simply never occurs".
 SILENT_RANGES = {
+    # BYSECOND/BYMINUTE/BYHOUR are here because dateutil ACCEPTS them at
+    # construction and only raises once iterating -- so Validate, which
+    # deliberately does not iterate, called BYSECOND=60 valid while every
+    # expansion node then rejected it.
+    "BYSECOND": (0, 59, False),
+    "BYMINUTE": (0, 59, False),
+    "BYHOUR": (0, 23, False),
     "BYMONTH": (1, 12, False),
     "BYMONTHDAY": (1, 31, True),
     "BYYEARDAY": (1, 366, True),
@@ -458,8 +465,11 @@ PROBE_DTSTART = datetime(1997, 9, 2, 9, 0, 0)
 def probe_rule(rule: str) -> None:
     """Let dateutil reject anything `check_rule` does not cover.
 
-    Constructing the rule is enough to surface dateutil's own argument errors
-    (BYHOUR, BYMINUTE, BYSECOND and BYSETPOS ranges among them). The rule is
+    Constructing the rule surfaces SOME of dateutil's own argument errors --
+    BYSETPOS ranges, malformed BYDAY. It does NOT surface others: dateutil
+    accepts BYSECOND=60 and BYMINUTE=60 at construction and raises only on
+    iteration, which is why those ranges are checked in SILENT_RANGES instead
+    of being left to this probe. The rule is
     deliberately not iterated here: a rule that is valid but matches nothing --
     "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30" -- would iterate to dateutil's year
     ceiling before yielding, and that cost belongs to expansion, not validation.
@@ -624,15 +634,40 @@ def zone_for(kind: str, tzid: str) -> Optional[tzinfo]:
 # moment it passed its target would stop one occurrence too early and lose a
 # real one.
 #
-# The margin is DERIVED, not guessed. UTC offsets in the tz database span
-# UTC-12:00 to UTC+14:00, a range of 26 hours, so two instants' offsets can
-# differ by at most that -- and a later-in-local occurrence can therefore be at
-# most 26 hours earlier in UTC. An earlier version used 3 hours, reasoning from
-# ordinary DST shifts; that is wrong, because the database also contains
-# dateline moves. Pacific/Apia skipped 2011-12-30 entirely, displacing
-# occurrences by ~23 hours, and Contains then denied an occurrence Expand had
-# just emitted. 30 hours clears the real bound with margin to spare.
+# The margin is DERIVED, and the derivation matters more than the number.
+#
+# What bounds the displacement is the maximum offset spread WITHIN A SINGLE
+# ZONE, because one expansion happens in one zone. Measured across the tz
+# database, the widest is Pacific/Apia at 25h30m (its 2011 dateline move),
+# followed by Pacific/Guam 25h21m and Pacific/Saipan 25h17m. 30 hours clears
+# that with room to spare.
+#
+# An earlier comment here derived it from the GLOBAL range of UTC offsets and
+# called that 26 hours. Both halves were wrong: the true global span is 31h09m
+# (Asia/Manila's LMT at -15:56:08 to America/Metlakatla's at +15:13:42), which
+# would EXCEED this margin -- but the global span is not the operative bound,
+# since a recurrence never spans two zones. The constant survived a wrong
+# justification, which is exactly the kind of luck not to rely on.
+#
+# Before that, it was 3 hours, reasoned from ordinary DST shifts. That missed
+# dateline moves entirely: Pacific/Apia skipped 2011-12-30, and Contains then
+# denied an occurrence Expand had just emitted.
 REORDER_MARGIN = timedelta(hours=30)
+
+
+def widen(key: datetime, margin: timedelta) -> datetime:
+    """Push a comparison key past its target by the reorder margin, saturating.
+
+    datetime arithmetic raises OverflowError rather than clamping, so adding the
+    margin to a key near the end of the representable calendar crashed on input
+    that was entirely valid -- a window ending in the final 30 hours of year
+    9999. There is nothing beyond the ceiling to look for, so saturating there
+    is both safe and the right answer.
+    """
+    try:
+        return key + margin
+    except OverflowError:
+        return key.max.replace(tzinfo=key.tzinfo)
 
 
 def cmp_key(dt: datetime) -> datetime:
@@ -729,6 +764,10 @@ class Expansion:
         # the RRULE alone (see take()).
         self.rule_count = None
         self.count_settles = False
+        # True when the rule states neither COUNT nor UNTIL, so it defines
+        # infinitely many occurrences and can only ever stop at the calendar's
+        # end.
+        self.rule_is_endless = False
 
     def format(self, dt: datetime) -> str:
         return format_instant(dt, self.kind, self.zone)
@@ -792,6 +831,12 @@ def build(recurrence) -> Expansion:
     if "COUNT" in by_part:
         expansion.rule_count = int(by_part["COUNT"])
         expansion.count_settles = not recurrence.rdate and not recurrence.exdate
+    expansion.rule_is_endless = (
+        "COUNT" not in by_part
+        and "UNTIL" not in by_part
+        and not recurrence.rdate
+        and not recurrence.exdate
+    )
     return expansion
 
 
@@ -826,10 +871,14 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
         try:
             dt = next(iterator)
         except StopIteration:
-            if last is not None and last.year >= MAX_YEAR:
-                # The expander stopped because there is no representable year
-                # beyond this, not because the rule ran out. A caller must not
-                # read the short list as an exact answer.
+            # Did the RULE end, or did the CALENDAR? Judging by the last
+            # occurrence's year was arbitrary: an unbounded leap-day rule whose
+            # final representable occurrence is 9996-02-29 stopped for exactly
+            # the same reason as one ending in 9999, and got the opposite
+            # verdict. Ask instead whether the rule had anything left to give.
+            if exp.rule_is_endless:
+                exp.ceiling_reached = True
+            elif exp.count_settles and steps < (exp.rule_count or 0):
                 exp.ceiling_reached = True
             return
         except RecurError:

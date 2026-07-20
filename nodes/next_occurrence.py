@@ -2,7 +2,7 @@ from gen.messages_pb2 import NextRequest, Occurrence
 from gen.axiom_context import AxiomContext
 
 from nodes import _recur
-from nodes._recur import REORDER_MARGIN, RecurError, build, cmp_key, walk
+from nodes._recur import REORDER_MARGIN, widen, RecurError, build, cmp_key, walk
 
 
 def _compute(ax: AxiomContext, input: NextRequest) -> Occurrence:
@@ -17,7 +17,7 @@ def _compute(ax: AxiomContext, input: NextRequest) -> Occurrence:
                 continue
             if best is None or key < cmp_key(best):
                 best = dt
-            if key > cmp_key(best) + REORDER_MARGIN:
+            if key > widen(cmp_key(best), REORDER_MARGIN):
                 # Far enough past the best candidate that nothing later can
                 # undercut it, even across a zone shift.
                 break

@@ -157,6 +157,10 @@ half-given. When the budget stops them before they reach an answer they return
 `LIMIT_EXCEEDED`, because reporting "no next occurrence" or "not a member" from
 an unfinished search would be a wrong answer stated with confidence.
 
+`truncated` is also set when a recurrence runs past the end of the representable
+calendar (year 9999): those occurrences exist in RFC 5545 terms but cannot be
+expressed, so the list is short for a reason worth surfacing.
+
 **Rules that can never occur are refused up front.** `BYMONTH=2;BYMONTHDAY=30`
 has no answer to find — February has no 30th — and the expander would only
 discover that by scanning to year 9999. A calendar fact settles it in

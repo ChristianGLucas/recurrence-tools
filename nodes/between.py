@@ -2,7 +2,7 @@ from gen.messages_pb2 import BetweenRequest, OccurrenceList
 from gen.axiom_context import AxiomContext
 
 from nodes import _recur
-from nodes._recur import REORDER_MARGIN, RecurError, build, cmp_key, effective_limit, walk
+from nodes._recur import REORDER_MARGIN, widen, RecurError, build, cmp_key, effective_limit, walk
 
 
 def _compute(ax: AxiomContext, input: BetweenRequest) -> OccurrenceList:
@@ -25,7 +25,7 @@ def _compute(ax: AxiomContext, input: BetweenRequest) -> OccurrenceList:
             if cmp_key(dt) < start_key:
                 continue
             reached = True
-            if cmp_key(dt) >= end_key + REORDER_MARGIN:
+            if cmp_key(dt) >= widen(end_key, REORDER_MARGIN):
                 break
             if cmp_key(dt) >= end_key:
                 continue
@@ -33,7 +33,7 @@ def _compute(ax: AxiomContext, input: BetweenRequest) -> OccurrenceList:
                 truncated = True
                 break
             occurrences.append(exp.format(dt))
-        truncated = truncated or exp.budget_exhausted
+        truncated = truncated or exp.budget_exhausted or exp.ceiling_reached
         if exp.budget_exhausted and not reached:
             # The scan ran out before it ever entered the window, so "no
             # occurrences here" was never established. An empty list would read

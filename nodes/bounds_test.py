@@ -840,3 +840,181 @@ def test_possible_bysetpos_positions_are_not_refused(rule):
     """The ceiling is per-interval capacity, which BY* parts only narrow -- so
     it can refuse the impossible but must never refuse the possible."""
     assert validate(FakeContext(), RuleInput(rrule=rule)).valid is True
+
+
+# --- Killing tests for behaviours a mutation run found ungated --------------
+#
+# Each of these corresponds to a mutant that survived the suite: the code was
+# deliberately broken and every test still passed. A constant the package
+# documents but no test pins is a constant that can drift silently.
+
+def test_between_flags_a_budget_stopped_window_as_truncated():
+    """The silent-short-answer path, ungated in exactly the node it matters in."""
+    result = between(
+        FakeContext(),
+        BetweenRequest(
+            recurrence=recurrence("FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0", "20200101T000000"),
+            start="20200101T000000",
+            end="21000101T000000",
+            limit=10000,
+        ),
+    )
+    assert result.error.code == "", result.error.message
+    assert result.count > 0
+    assert result.truncated is True, "a budget-stopped window must not look complete"
+
+
+def test_count_flags_a_budget_stopped_count_as_truncated():
+    result = count(
+        FakeContext(),
+        CountRequest(
+            recurrence=recurrence("FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0", "20200101T000000"),
+            limit=10000,
+        ),
+    )
+    assert result.error.code == "", result.error.message
+    assert result.truncated is True
+
+
+def test_the_wall_clock_deadline_is_short_enough_to_bound_a_request():
+    """Pins the VALUE, not just the mechanism. A test that shrinks the deadline
+    proves the kill path works but would still pass if the shipped constant were
+    two minutes."""
+    assert 0 < _recur.SCAN_TIMEOUT_SECONDS <= 5.0
+    assert _recur.REAP_TIMEOUT_SECONDS <= 1.0
+
+
+def test_an_ambiguous_local_anchor_resolves_to_the_first_instant():
+    """Fall-back 01:30 happens twice; which one is chosen changes the real UTC
+    answer, and only an absolute window can observe it."""
+    result = between(
+        FakeContext(),
+        BetweenRequest(
+            recurrence=recurrence("FREQ=DAILY;COUNT=1", "20261101T013000", tzid=NY),
+            start="20261101T052000Z",
+            end="20261101T054000Z",
+        ),
+    )
+    assert list(result.occurrences) == ["20261101T013000"], "must be 05:30Z, the first"
+    later = between(
+        FakeContext(),
+        BetweenRequest(
+            recurrence=recurrence("FREQ=DAILY;COUNT=1", "20261101T013000", tzid=NY),
+            start="20261101T062000Z",
+            end="20261101T064000Z",
+        ),
+    )
+    assert list(later.occurrences) == [], "06:30Z is the second instant, not chosen"
+
+
+def test_the_rdate_and_exdate_caps_are_enforced_at_their_documented_size():
+    """No test previously supplied more than one rdate, so cutting the cap from
+    1000 to 10 -- or deleting the guard -- changed nothing the suite noticed."""
+    at_cap = expand(
+        FakeContext(),
+        ExpandRequest(
+            recurrence=recurrence(
+                "FREQ=DAILY;COUNT=1", "20260101T000000",
+                rdate=[
+                    (datetime(2027, 1, 1) + timedelta(days=n)).strftime("%Y%m%dT000000")
+                    for n in range(1000)
+                ],
+            ),
+            limit=10000,
+        ),
+    )
+    assert at_cap.error.code == "", at_cap.error.message
+    assert at_cap.count == 1001
+
+    over_cap = expand(
+        FakeContext(),
+        ExpandRequest(
+            recurrence=recurrence(
+                "FREQ=DAILY;COUNT=1", "20260101T000000",
+                rdate=["20270101T000000"] * 1001,
+            ),
+            limit=10,
+        ),
+    )
+    assert over_cap.error.code == "LIMIT_EXCEEDED"
+    assert "1001" in over_cap.error.message
+
+
+def test_a_trailing_newline_cannot_slip_through_the_rule_guard():
+    """The guard uses \\Z rather than $ precisely because $ also matches before a
+    trailing newline. Nothing pinned that choice."""
+    assert validate(FakeContext(), RuleInput(rrule="FREQ=DAILY;COUNT=3\n")).valid is False
+    assert validate(FakeContext(), RuleInput(rrule="FREQ=DAILY;COUNT=3")).valid is True
+
+
+def test_years_below_1000_are_zero_padded():
+    """strftime does not pad them, which produced instants dateutil then
+    rejected. The docstring said so; no test did."""
+    result = expand(
+        FakeContext(),
+        ExpandRequest(
+            recurrence=recurrence("FREQ=YEARLY;COUNT=2", "00010101T090000"), limit=5
+        ),
+    )
+    assert list(result.occurrences) == ["00010101T090000", "00020101T090000"]
+
+
+def test_a_tzid_without_a_region_is_refused():
+    """'localtime' and 'Factory' resolve through host configuration, so the same
+    request would expand differently on different machines."""
+    for host_dependent in ("localtime", "Factory", "UTC"):
+        result = expand(
+            FakeContext(),
+            ExpandRequest(
+                recurrence=recurrence("FREQ=DAILY;COUNT=1", "20260101T000000", tzid=host_dependent),
+                limit=1,
+            ),
+        )
+        assert result.error.code == "INVALID_ARGUMENT", host_dependent
+
+
+def test_negative_yeardays_resolve_to_the_right_months():
+    """The negative arm of the yearday->month mapping changed 13 of 366 answers
+    when broken, with the suite still green."""
+    assert validate(FakeContext(), RuleInput(rrule="FREQ=YEARLY;BYYEARDAY=-1;BYMONTH=12")).valid is True
+    assert validate(FakeContext(), RuleInput(rrule="FREQ=YEARLY;BYYEARDAY=-1;BYMONTH=1")).valid is False
+    assert validate(FakeContext(), RuleInput(rrule="FREQ=YEARLY;BYYEARDAY=-365;BYMONTH=1")).valid is True
+    assert validate(FakeContext(), RuleInput(rrule="FREQ=YEARLY;BYYEARDAY=-365;BYMONTH=6")).valid is False
+
+
+def test_an_oversized_echoed_value_is_truncated_at_its_documented_length():
+    result = expand(
+        FakeContext(),
+        ExpandRequest(
+            recurrence=recurrence("FREQ=DAILY;COUNT=1", "20260101T000000", tzid="A" * 5000),
+            limit=1,
+        ),
+    )
+    assert result.error.code == "INVALID_ARGUMENT"
+    # The echoed VALUE is capped at MAX_ECHO; the surrounding sentence adds a
+    # little more. What matters is that a 5000-character input cannot buy a
+    # 5000-character response.
+    assert len(result.error.message) < 300
+    assert "5000 characters" in result.error.message
+
+
+def test_validate_accepting_a_by_part_value_means_expand_accepts_it_too():
+    """The property that was unasserted anywhere, and that let Validate bless
+    BYSECOND=60 while every expansion node rejected it."""
+    probes = []
+    for part, freq, edge in (
+        ("BYSECOND", "MINUTELY", 60), ("BYMINUTE", "HOURLY", 60),
+        ("BYHOUR", "DAILY", 24), ("BYMONTH", "YEARLY", 13),
+        ("BYMONTHDAY", "MONTHLY", 32), ("BYSETPOS", "MONTHLY", 400),
+    ):
+        for value in (edge - 1, edge):
+            probes.append(f"FREQ={freq};{part}={value}")
+    for rule in probes:
+        valid = validate(FakeContext(), RuleInput(rrule=rule)).valid
+        served = expand(
+            FakeContext(),
+            ExpandRequest(recurrence=recurrence(rule, "20260101T000000"), limit=1),
+        )
+        assert valid == (served.error.code == ""), (
+            f"{rule}: Validate says {valid} but Expand says {served.error.code or 'ok'}"
+        )

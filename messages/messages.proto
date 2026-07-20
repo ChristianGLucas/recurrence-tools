@@ -210,8 +210,10 @@ message OccurrenceList {
   // whole budget and lose the occurrences already collected. Over-reporting is
   // the safe direction. Below the limit it is exact.
   //
-  // A recurrence running past the end of the representable calendar (year 9999)
-  // simply stops there, with `truncated` false -- there is nothing beyond it.
+  // A recurrence that runs off the end of the representable calendar (year
+  // 9999) is also flagged truncated: it defines occurrences that exist in
+  // RFC 5545 terms but cannot be represented, so the list is short for a reason
+  // the caller should know about rather than silently.
   bool truncated = 3;
   // Set when the request could not be served.
   Error error = 4;
