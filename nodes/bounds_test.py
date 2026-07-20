@@ -514,10 +514,17 @@ def test_caller_strings_echoed_into_errors_are_bounded():
     assert "200000 characters" in result.error.message
 
 
-def test_oversized_repeated_fields_are_refused_before_being_built():
-    result = build(FakeContext(), RuleParts(freq="DAILY", bysetpos=[1] * 100000))
+def test_oversized_fields_are_refused_before_being_built():
+    """Counted on DISTINCT values: a repeated entry collapses in the canonical
+    form, so only a genuinely large set of distinct values is too big to fit."""
+    result = build(FakeContext(), RuleParts(freq="YEARLY", byyearday=list(range(1, 2000))))
     assert result.error.code == "LIMIT_EXCEEDED"
-    assert "100000 entries" in result.error.message
+    assert "entries" in result.error.message
+
+    # The same COUNT of entries, all identical, collapses and is served.
+    collapsed = build(FakeContext(), RuleParts(freq="YEARLY", byyearday=[100] * 2000))
+    assert collapsed.error.code == "", collapsed.error.message
+    assert collapsed.rrule == "FREQ=YEARLY;BYYEARDAY=100"
 
 
 # --- The wall-clock backstop, which nothing previously exercised -----------
@@ -1194,3 +1201,60 @@ def test_a_repeated_list_is_measured_after_deduplication(freq, entry, repeats, e
     result = build(FakeContext(), RuleParts(freq=freq, byday=[entry] * repeats))
     assert result.error.code == "", result.error.message
     assert result.rrule == expected
+
+
+def test_deciding_the_ceiling_does_not_double_the_work():
+    """The second RRULE pass must be charged, not free.
+
+    Answering "did the RRULE reach its COUNT" re-walks the rule. Left uncharged
+    it doubled the worst case (1.1s -> 2.3s) against a 3s deadline, so a host
+    only 1.5x slower turned working input into a timeout.
+    """
+    request = CountRequest(
+        recurrence=recurrence(
+            "FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0;COUNT=230",
+            "20200101T000000",
+            exdate=("20200105T090000",),
+        ),
+        limit=10000,
+    )
+    result, elapsed = timed(lambda: count(FakeContext(), request))
+    assert result.error.code == "", result.error.message
+    assert result.count == 229
+    assert elapsed < 2.0, f"the second pass was not charged: {elapsed:.2f}s"
+
+
+def test_the_entry_count_guard_measures_distinct_values():
+    """A repeated entry collapses in the canonical form, so counting the raw
+    list refused input whose rule is twenty characters long."""
+    for repeats in (1024, 1025, 3000):
+        result = build(
+            FakeContext(), RuleParts(freq="WEEKLY", byday=["MO"] * repeats)
+        )
+        assert result.error.code == "", f"{repeats}: {result.error.message}"
+        assert result.rrule == "FREQ=WEEKLY;BYDAY=MO"
+
+    # A genuinely oversized list of DISTINCT values is still refused.
+    too_many = build(
+        FakeContext(), RuleParts(freq="YEARLY", byyearday=list(range(1, 2000)))
+    )
+    assert too_many.error.code == "LIMIT_EXCEEDED"
+
+
+def test_the_same_byday_ordinal_spelled_two_ways_is_one_entry():
+    """'1MO' and '01MO' are the same ordinal. Keeping both left the sort key
+    non-total, so canonical text order depended on set iteration order."""
+    messy = validate(
+        FakeContext(), RuleInput(rrule="FREQ=YEARLY;BYDAY=53MO,1MO,53MO,01MO,SU,mo")
+    )
+    tidy = validate(FakeContext(), RuleInput(rrule="FREQ=YEARLY;BYDAY=MO,1MO,53MO,SU"))
+    assert messy.valid and tidy.valid
+    assert messy.normalized == tidy.normalized
+
+
+def test_build_names_the_offending_byday_entry():
+    """Pins the validate-before-canonicalize ORDER specifically: reverting it
+    alone previously left every test green."""
+    result = build(FakeContext(), RuleParts(freq="WEEKLY", byday=["MO", "XX", "WE"]))
+    assert result.error.code == "INVALID_RULE"
+    assert "XX" in result.error.message, result.error.message

@@ -521,10 +521,19 @@ def _canonical_value(key: str, value: str) -> str:
         # leaving BYDAY out made `normalized` unusable as an equality key.
         # Sorted like every other list part -- BY* order does not affect the
         # recurrence set, so two spellings of one rule must converge on one text.
-        entries = {
-            (item[1:] if item.startswith("+") else item).upper()
-            for item in value.split(",")
-        }
+        def normalize(item):
+            entry = item.upper()
+            weekday, prefix = entry[-2:], entry[:-2].lstrip("+")
+            if prefix in ("", "-"):
+                return entry.lstrip("+")
+            try:
+                # '01MO' and '1MO' are the same ordinal; leaving both left the
+                # sort key non-total and the canonical text order unstable.
+                return f"{int(prefix)}{weekday}"
+            except ValueError:
+                return entry.lstrip("+")
+
+        entries = {normalize(item) for item in value.split(",")}
         def order(entry):
             # Only validated entries should reach here. This must not be the
             # thing that raises if one ever does -- an unrecognised entry sorts
@@ -782,20 +791,37 @@ class Expansion:
     def instant(self, value: str, field: str) -> datetime:
         return coerce(value, field, self.zone, self.kind)
 
-    def rrule_yield_count(self) -> int:
-        """How many occurrences the RRULE alone produces, capped at its COUNT.
+    def rule_reached_its_count(self, budget: float) -> bool:
+        """Did the RRULE alone produce its full COUNT, within a work budget?
 
-        Bounded by COUNT (at most MAX_LIMIT) and reached only on the rare path
-        where a COUNT went unmet alongside an RDATE or EXDATE.
+        Answering this decides whether a COUNT shortfall came from an EXDATE the
+        caller asked for or from the calendar running out, and it is only
+        reachable when a COUNT went unmet with an RDATE/EXDATE also in play.
+
+        It re-walks the RRULE, so it is charged against the SAME candidate
+        budget the first walk spends -- an uncharged second pass doubled the
+        worst case (1.1s -> 2.3s) and turned working input into a timeout on a
+        slower host. If the budget runs out before the question is settled, the
+        answer is unknown, and the caller is told the result may be short rather
+        than promised it is complete.
         """
         if self.rule is None or self.rule_count is None:
-            return 0
+            return True
         produced = 0
-        for _ in self.rule:
+        scanned = 0.0
+        previous = self.anchor
+        for occurrence in self.rule:
+            if previous is not None:
+                gap = (occurrence - previous).total_seconds()
+                if gap > 0:
+                    scanned += gap / self.step_seconds
+            previous = occurrence
+            if scanned > budget:
+                return False  # unknown: report as possibly short
             produced += 1
             if produced >= self.rule_count:
-                break
-        return produced
+                return True
+        return False
 
 
 def build(recurrence) -> Expansion:
@@ -901,7 +927,11 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
                 exp.ceiling_reached = True
             elif exp.count_settles and steps < (exp.rule_count or 0):
                 exp.ceiling_reached = True
-            elif exp.rule_count is not None and not exp.count_settles:
+            elif (
+                exp.rule_count is not None
+                and not exp.count_settles
+                and steps < exp.rule_count
+            ):
                 # A COUNT went unmet while an RDATE or EXDATE was also in play,
                 # so the merged total cannot say which caused the shortfall.
                 # It is exactly answerable, though: COUNT bounds the RRULE
@@ -909,11 +939,19 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
                 # than COUNT means the calendar ended; exactly COUNT means an
                 # EXDATE removed the difference.
                 #
+                # Gated on a SHORTFALL. If the merged walk already produced
+                # COUNT occurrences it cannot have been cut short by the
+                # calendar, so asking again is pure cost -- and it doubled the
+                # worst case (1.1s -> 2.3s) on the very path the time budget is
+                # sized for, turning working input into a timeout on a slower
+                # host.
+                #
                 # An earlier attempt guessed from proximity to year 9999 and was
                 # wrong in both directions -- it fired 99 years early for a
                 # rule with INTERVAL=100, and missed entirely when several
                 # EXDATEs removed the tail.
-                exp.ceiling_reached = exp.rrule_yield_count() < exp.rule_count
+                remaining = max(0.0, scan_budget - scanned)
+                exp.ceiling_reached = not exp.rule_reached_its_count(remaining)
             return
         except RecurError:
             raise

@@ -53,7 +53,9 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
         # anything is built. Joining first would materialize a 200KB string only
         # to reject it for exceeding 2048.
         for name in ("byday",) + tuple(p.lower() for p in INT_LIST_PARTS):
-            values = getattr(input, name)
+            # Count DISTINCT values: a repeated entry collapses in the canonical
+            # form, so measuring the raw list refused input whose rule is short.
+            values = list(dict.fromkeys(str(v).upper() for v in getattr(input, name)))
             if len(values) * 2 > MAX_RULE_LEN:
                 raise RecurError(
                     "LIMIT_EXCEEDED",
