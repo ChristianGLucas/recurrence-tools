@@ -10,7 +10,7 @@ def _compute(ax: AxiomContext, input: ExpandRequest) -> OccurrenceList:
         limit = effective_limit(input.limit)
         exp = build(input.recurrence)
         occurrences, truncated = take(exp, limit)
-        if not occurrences and exp.budget_exhausted:
+        if not occurrences and (exp.budget_exhausted or exp.ceiling_reached):
             # Nothing was found AND the search stopped early, so "no
             # occurrences" was never established. An empty success reads as a
             # finding; the sibling nodes already report this case rather than

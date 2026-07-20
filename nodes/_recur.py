@@ -333,6 +333,46 @@ MAX_SET_SIZE = {
 }
 
 
+# How many days an interval spans, per frequency. The time-of-day factor is
+# computed separately from the BY* parts that actually populate it.
+FREQ_DAY_SPAN = {
+    "SECONDLY": 1, "MINUTELY": 1, "HOURLY": 1, "DAILY": 1,
+    "WEEKLY": 7, "MONTHLY": 31, "YEARLY": 366,
+}
+
+# Which time-of-day components an interval of each frequency contains. A
+# MINUTELY interval contains seconds but not hours; a DAILY one contains all
+# three.
+FREQ_TIME_PARTS = {
+    "SECONDLY": (),
+    "MINUTELY": (("BYSECOND", 60),),
+    "HOURLY": (("BYMINUTE", 60), ("BYSECOND", 60)),
+    "DAILY": (("BYHOUR", 24), ("BYMINUTE", 60), ("BYSECOND", 60)),
+    "WEEKLY": (("BYHOUR", 24), ("BYMINUTE", 60), ("BYSECOND", 60)),
+    "MONTHLY": (("BYHOUR", 24), ("BYMINUTE", 60), ("BYSECOND", 60)),
+    "YEARLY": (("BYHOUR", 24), ("BYMINUTE", 60), ("BYSECOND", 60)),
+}
+
+
+def _interval_capacity(by, freq):
+    """The most instants one interval of this frequency can contain.
+
+    Still a CEILING -- BYDAY and BYMONTHDAY narrow the day count further and are
+    deliberately not counted -- so it can refuse the impossible but never the
+    possible. It does account for the time-of-day parts, which is the difference
+    between refusing `BYSETPOS=60` on `FREQ=MINUTELY;BYSECOND=0,30` (an interval
+    holding exactly two instants) and letting it burn the whole time budget
+    discovering that for itself.
+    """
+    span = FREQ_DAY_SPAN.get(freq)
+    if span is None:
+        return None
+    capacity = span
+    for part, full_range in FREQ_TIME_PARTS[freq]:
+        capacity *= len(by[part].split(",")) if part in by else full_range
+    return capacity
+
+
 def _check_setpos_feasible(parts: List[Tuple[str, str]], freq: str) -> None:
     """Refuse a BYSETPOS position no interval could ever contain.
 
@@ -344,7 +384,7 @@ def _check_setpos_feasible(parts: List[Tuple[str, str]], freq: str) -> None:
     by = {k: v for k, v in parts}
     if "BYSETPOS" not in by:
         return
-    ceiling = MAX_SET_SIZE.get(freq)
+    ceiling = _interval_capacity(by, freq)
     if ceiling is None:
         return
     try:
@@ -502,12 +542,17 @@ def _split_parts(rule: str) -> List[Tuple[str, str]]:
 def canonical_rule(parts: Iterable[Tuple[str, str]]) -> str:
     """Re-serialize validated parts in this package's canonical order.
 
-    INTERVAL=1 is dropped: it is the RFC default, so stating it and omitting it
-    are the same rule, and a canonical form that distinguishes them cannot serve
-    as an equality key. Parse still reports it, because Parse's job is to
-    describe the text it was given.
+    INTERVAL=1 and WKST=MO are dropped: both are RFC defaults, so stating one
+    and omitting it are the same rule, and a canonical form that distinguishes
+    them cannot serve as an equality key. Parse still reports them, because
+    Parse's job is to describe the text it was given.
     """
-    by_key = {k: v for k, v in parts if not (k == "INTERVAL" and v.strip() == "1")}
+    by_key = {
+        k: v
+        for k, v in parts
+        if not (k == "INTERVAL" and v.strip() == "1")
+        and not (k == "WKST" and v.strip().upper() == "MO")
+    }
     ordered = [k for k in CANONICAL_ORDER if k in by_key]
     return ";".join(f"{k}={_canonical_value(k, by_key[k])}" for k in ordered)
 

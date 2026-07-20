@@ -1473,3 +1473,76 @@ def test_rdates_cannot_mask_a_count_the_calendar_cut_short(rdates, expected_coun
     assert expanded.count == expected_count
     assert expanded.truncated is True, "the RRULE asked for 3 and the calendar gave 1"
     assert counted.truncated is True
+
+
+# --- The interval-capacity ceiling must account for what populates it -------
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=MINUTELY;BYSECOND=0,30;BYSETPOS=60",   # interval holds 2, not 60
+        "FREQ=HOURLY;BYMINUTE=0;BYSECOND=0;BYSETPOS=2",
+        "FREQ=DAILY;BYHOUR=9;BYMINUTE=0;BYSECOND=0;BYSETPOS=2",
+    ],
+)
+def test_a_setpos_beyond_the_narrowed_capacity_is_refused(rule):
+    """A ceiling counted in seconds-per-interval was far too coarse: with
+    BYSECOND=0,30 a MINUTELY interval holds two instants, so BYSETPOS=60 can
+    never occur -- yet it passed the check and burned the whole time budget
+    proving it, which falsified the README's own headroom claims."""
+    result, elapsed = timed(
+        lambda: expand(
+            FakeContext(),
+            ExpandRequest(
+                recurrence=recurrence(rule, "19970902T090000"), limit=5
+            ),
+        )
+    )
+    assert result.error.code == "INVALID_RULE", result
+    assert "beyond what a" in result.error.message
+    assert elapsed < 1.0, f"took {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=MINUTELY;BYSECOND=0,30;BYSETPOS=2",    # exactly the capacity
+        "FREQ=MINUTELY;BYSECOND=0,30;BYSETPOS=-2",
+        "FREQ=HOURLY;BYMINUTE=0,30;BYSECOND=0;BYSETPOS=2",
+        "FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-2",  # the RFC's own example
+        "FREQ=YEARLY;BYDAY=MO;BYSETPOS=20",
+    ],
+)
+def test_the_narrowed_capacity_never_refuses_a_reachable_position(rule):
+    """Still a one-sided over-approximation: BYDAY and BYMONTHDAY narrow the day
+    count further and are deliberately NOT counted, so the ceiling can only ever
+    be too generous, never too strict."""
+    assert validate(FakeContext(), RuleInput(rrule=rule)).valid is True
+
+
+def test_wkst_monday_collapses_like_interval_one():
+    """Both are RFC defaults, so stating one and omitting it are the same rule.
+    Dropping only INTERVAL=1 left `normalized` unusable as an equality key for
+    any rule that spelled out WKST=MO."""
+    with_wkst = validate(FakeContext(), RuleInput(rrule="FREQ=WEEKLY;BYDAY=MO,WE;WKST=MO"))
+    without = validate(FakeContext(), RuleInput(rrule="FREQ=WEEKLY;BYDAY=MO,WE"))
+    assert with_wkst.valid and without.valid
+    assert with_wkst.normalized == without.normalized
+    # A non-default WKST is still meaningful and must survive.
+    sunday = validate(FakeContext(), RuleInput(rrule="FREQ=WEEKLY;BYDAY=MO,WE;WKST=SU"))
+    assert sunday.normalized != without.normalized
+
+
+def test_a_recurrence_that_never_occurs_before_year_9999_says_so():
+    """An empty list flagged `truncated` reads as "nothing found, and more may
+    exist" -- the opposite of what happened. The budget-exhausted case already
+    reported this; the calendar-ceiling case did not."""
+    result = expand(
+        FakeContext(),
+        ExpandRequest(
+            recurrence=recurrence("FREQ=MONTHLY;BYDAY=MO;BYSETPOS=6", "19970902T090000"),
+            limit=5,
+        ),
+    )
+    assert result.count == 0
+    assert result.error.code == "LIMIT_EXCEEDED", result

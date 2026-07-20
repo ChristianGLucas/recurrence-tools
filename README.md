@@ -63,9 +63,18 @@ a weekly 09:00 meeting in New York stays at 09:00 when the offset moves from
 Because occurrences are emitted as local wall-clock strings, the zone is not
 visible in the output itself; it becomes observable when the recurrence is
 compared against an **absolute** instant. 09:00 in New York is `14:00Z` in
-January but `13:00Z` in July, so the same UTC window passed to `Between` — or
-the same UTC `UNTIL` — will include an occurrence in winter and exclude it in
-summer. That is the behaviour `tzid` buys you.
+January but `13:00Z` in July.
+
+The two ways of comparing therefore cut in *opposite* directions, which is worth
+stating separately rather than together:
+
+- A **`Between` window** matches an exact instant, so a window at `14:00Z`
+  catches the January occurrence and misses the July one.
+- A UTC **`UNTIL`** is an upper bound, so it cuts the *later* UTC instant:
+  `UNTIL=…T130000Z` excludes January's 14:00Z occurrence while July's 13:00Z
+  survives it.
+
+That is the behaviour `tzid` buys you.
 
 ## Nodes
 
@@ -142,7 +151,7 @@ hang:
 | **Candidate instants examined** | **20,000,000** | `truncated` (or `LIMIT_EXCEEDED`, below) |
 | Impossible `BYMONTH`/`BYMONTHDAY` pair | refused up front | `INVALID_RULE` |
 | Impossible `BYYEARDAY`/`BYMONTH` pair | refused up front | `INVALID_RULE` |
-| `BYSETPOS` beyond an interval's capacity | refused up front | `INVALID_RULE` |
+| `BYSETPOS` beyond an interval's capacity | refused up front where the capacity is knowable | `INVALID_RULE` |
 | Wall-clock backstop | 3s deadline, ~3.5s worst case for the caller | `LIMIT_EXCEEDED` |
 | `limit` argument | 10000 accepted (default 100; `Count` defaults to 10000) | `INVALID_ARGUMENT` |
 
@@ -178,6 +187,12 @@ Each of these compares against a deliberate *ceiling* rather than an exact
 count, so it can refuse the impossible but never the possible: every refusal is
 cross-checked in the test suite against what the expander itself can produce.
 
+The capacity check counts the `BY*` parts that populate an interval, but it is
+a ceiling, not an exact count — `BYDAY` and `BYMONTHDAY` narrow the day set
+further and are deliberately not counted, so it refuses only the clearly
+impossible. A rule it cannot rule out is still caught by the wall-clock
+backstop below.
+
 **The wall-clock backstop is deliberately not the primary bound.** A clock is
 not deterministic; if it decided requests, identical input could return
 different answers under different load. Each expansion runs in a child process
@@ -185,10 +200,13 @@ whose result is awaited for 3 seconds; a worker that overruns is killed, which
 adds up to 0.5s more, so **the caller's worst case is about 3.5 seconds** — that
 is the number to size a client timeout against, not the internal 3s deadline.
 
-Measured on this machine, worst of three runs each: the scan-saturating sparse
-rule above ~1.2s, a `MINUTELY` sparse rule at the maximum limit ~0.9s, a dense
-expansion at the maximum limit ~0.03s. **Worst observed across every case
-tried: ~1.2s**, against a 3s deadline — roughly 2.5× headroom. Treat these as
+Measured on this machine, worst of three runs each: a scan-saturating sparse
+rule ~1.2s, a `MINUTELY` sparse rule at the maximum limit ~0.9s, a dense
+expansion at the maximum limit ~0.03s (~0.45s over HTTP, dominated by
+serializing 10000 strings). The **ceiling check can re-walk the rule, so that
+path measures ~2.4s** — about 80% of the 3s deadline. Under concurrent load the
+deadline is genuinely reached, and reaching it produces a structured
+`LIMIT_EXCEEDED`, never a hang or a wrong answer. Treat all of these as
 indicative of one machine, not as a contract.
 
 **Determinism, precisely.** The scan budget is a count, so for every rule whose
@@ -202,13 +220,11 @@ the next one. A rule whose occurrences were far enough apart could in principle
 pay a cost no count had the chance to object to, leaving the wall clock to
 decide — and a wall clock is not deterministic.
 
-In practice no such input has been found. Three independent reviewers and the
-author each tried to construct one and could not: the expander skips whole days
-when `BYMONTH`/`BYMONTHDAY` narrow a rule, so wide gaps are far cheaper to cross
-than their span suggests, and the feasibility checks refuse the impossible rules
-outright. The backstop has never been observed to fire on any input that was not
-deliberately given a shortened deadline. It is kept because "not found" is not
-the same as "cannot exist".
+Inputs that reach it do exist and are not exotic: a rule whose feasibility the
+capacity check cannot settle, or one that yields nothing while remaining cheap
+per step, will run until the deadline stops it. Each such case that has been
+identified was then refused up front instead, but the class is open — which is
+exactly why the backstop is kept rather than argued away.
 
 If a platform cannot provide an isolated worker, the request is refused rather
 than run unbounded.

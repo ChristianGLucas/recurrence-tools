@@ -17,7 +17,7 @@ def _compute(ax: AxiomContext, input: CountRequest) -> OccurrenceCount:
                 break
             total += 1
         truncated = truncated or exp.budget_exhausted or exp.ceiling_reached
-        if total == 0 and exp.budget_exhausted:
+        if total == 0 and (exp.budget_exhausted or exp.ceiling_reached):
             raise RecurError(
                 "LIMIT_EXCEEDED",
                 "the scan budget ran out before finding any occurrence; "
