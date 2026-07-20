@@ -1221,7 +1221,11 @@ def test_deciding_the_ceiling_does_not_double_the_work():
     result, elapsed = timed(lambda: count(FakeContext(), request))
     assert result.error.code == "", result.error.message
     assert result.count == 229
-    assert elapsed < 2.0, f"the second pass was not charged: {elapsed:.2f}s"
+    # The correctness the cost was traded against: the RRULE did reach its
+    # COUNT and an EXDATE removed one, so this is complete, not truncated.
+    # Funding the second walk from the first walk's leftovers made this True.
+    assert result.truncated is False, "an EXDATE shortfall is not truncation"
+    assert elapsed < 3.0, f"second walk unbounded: {elapsed:.2f}s"
 
 
 def test_the_entry_count_guard_measures_distinct_values():
@@ -1253,8 +1257,37 @@ def test_the_same_byday_ordinal_spelled_two_ways_is_one_entry():
 
 
 def test_build_names_the_offending_byday_entry():
-    """Pins the validate-before-canonicalize ORDER specifically: reverting it
-    alone previously left every test green."""
+    """A malformed entry must be named, and must never be called our fault.
+
+    This does NOT pin the validate-before-canonicalize ordering: the sorter is
+    now defensive, so reverting the ordering alone leaves this green. The
+    ordering is defence in depth rather than the load-bearing mechanism, and
+    claiming otherwise would be a test asserting something it cannot see.
+    """
     result = build(FakeContext(), RuleParts(freq="WEEKLY", byday=["MO", "XX", "WE"]))
     assert result.error.code == "INVALID_RULE"
+    assert result.error.code != "INTERNAL"
     assert "XX" in result.error.message, result.error.message
+
+
+@pytest.mark.parametrize("rule_count", [110, 130, 200, 230])
+def test_an_exdate_shortfall_is_never_asserted_as_truncation(rule_count):
+    """The second walk costs what the first walk cost, so funding it from the
+    first walk's leftovers left it unfunded exactly when it was needed -- and an
+    undetermined answer was then reported as a positive claim of truncation.
+    Abstention is not a finding.
+    """
+    result = count(
+        FakeContext(),
+        CountRequest(
+            recurrence=recurrence(
+                f"FREQ=SECONDLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0;COUNT={rule_count}",
+                "20200101T000000",
+                exdate=("20200105T090000",),
+            ),
+            limit=10000,
+        ),
+    )
+    assert result.error.code == "", result.error.message
+    assert result.count == rule_count - 1
+    assert result.truncated is False

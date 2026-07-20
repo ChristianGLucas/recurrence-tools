@@ -55,6 +55,9 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
         for name in ("byday",) + tuple(p.lower() for p in INT_LIST_PARTS):
             # Count DISTINCT values: a repeated entry collapses in the canonical
             # form, so measuring the raw list refused input whose rule is short.
+            # String-keyed, so it can only ever over-count relative to the
+            # canonical form ('1MO' and '01MO' count as two) -- never under, so
+            # no oversized distinct list slips through.
             values = list(dict.fromkeys(str(v).upper() for v in getattr(input, name)))
             if len(values) * 2 > MAX_RULE_LEN:
                 raise RecurError(

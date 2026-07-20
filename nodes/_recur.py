@@ -791,19 +791,24 @@ class Expansion:
     def instant(self, value: str, field: str) -> datetime:
         return coerce(value, field, self.zone, self.kind)
 
-    def rule_reached_its_count(self, budget: float) -> bool:
+    def rule_reached_its_count(self, budget: float):
         """Did the RRULE alone produce its full COUNT, within a work budget?
 
         Answering this decides whether a COUNT shortfall came from an EXDATE the
         caller asked for or from the calendar running out, and it is only
         reachable when a COUNT went unmet with an RDATE/EXDATE also in play.
 
-        It re-walks the RRULE, so it is charged against the SAME candidate
-        budget the first walk spends -- an uncharged second pass doubled the
-        worst case (1.1s -> 2.3s) and turned working input into a timeout on a
-        slower host. If the budget runs out before the question is settled, the
-        answer is unknown, and the caller is told the result may be short rather
-        than promised it is complete.
+        It re-walks the RRULE over the same span the first walk covered, so it
+        costs about what that walk cost. Funding it from the FIRST walk's
+        leftovers was therefore self-defeating: once the first walk had spent
+        half the budget the remainder could never suffice, and the remainder is
+        insufficient precisely when this path is reached. It gets its own
+        budget.
+
+        Returns True (reached COUNT), False (did not), or None (could not be
+        determined within the budget). None is an ABSTENTION, not a finding --
+        the caller must not turn "I could not tell" into a claim that the
+        calendar cut the answer short.
         """
         if self.rule is None or self.rule_count is None:
             return True
@@ -817,7 +822,7 @@ class Expansion:
                     scanned += gap / self.step_seconds
             previous = occurrence
             if scanned > budget:
-                return False  # unknown: report as possibly short
+                return None  # unknown -- abstain rather than assert
             produced += 1
             if produced >= self.rule_count:
                 return True
@@ -950,8 +955,10 @@ def walk(exp: Expansion, budget: int = MAX_STEPS,
                 # wrong in both directions -- it fired 99 years early for a
                 # rule with INTERVAL=100, and missed entirely when several
                 # EXDATEs removed the tail.
-                remaining = max(0.0, scan_budget - scanned)
-                exp.ceiling_reached = not exp.rule_reached_its_count(remaining)
+                reached = exp.rule_reached_its_count(scan_budget)
+                # None means undetermined. Only a definite "did not reach its
+                # COUNT" is evidence the calendar ended.
+                exp.ceiling_reached = reached is False
             return
         except RecurError:
             raise
