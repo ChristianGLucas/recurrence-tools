@@ -29,12 +29,20 @@ from typing import Iterable, Iterator, List, Optional, Tuple
 
 from dateutil.rrule import rrulestr, rruleset
 
-# --- Bounds. Every one of these is enforced against the RAW input, before any
-# --- parsing, allocation, or iteration that the value could make expensive.
+# --- Bounds. Payload size (rule text length, rdate/exdate list length, a
+# --- caller's requested `limit` or COUNT) is the platform's job, not this
+# --- package's, and every guard that only bounded THAT has been removed.
+# --- What remains is the genuine, unavoidable cost/hang bound: a recurrence
+# --- rule can be infinite (or match nothing at all, scanning toward the
+# --- calendar's end inside a single dateutil call with no way to interrupt
+# --- it short of killing the process — see `isolate` below), so `walk`'s
+# --- MAX_STEPS/MAX_SCAN_STEPS budgets and the isolated wall-clock timeout
+# --- are load-bearing regardless of how large any caller-controlled input
+# --- is, and are the only thing standing between a rule and a hung worker.
 
-MAX_RULE_LEN = 2048
-MAX_DATE_LIST = 1000
-MAX_LIMIT = 10000
+# DEFAULT_LIMIT is a domain necessity, not a size guard: an endless RRULE (no
+# COUNT/UNTIL) has no "everything" to return, so a caller who doesn't specify
+# `limit` needs *some* default occurrence count back.
 DEFAULT_LIMIT = 100
 
 # The iterator-step ceiling, counted over occurrences the expander YIELDS.
@@ -170,11 +178,6 @@ def check_rule(rule: str) -> List[Tuple[str, str]]:
     """
     if rule is None or rule == "":
         raise _err("INVALID_RULE", "rrule is required and must not be empty")
-    if len(rule) > MAX_RULE_LEN:
-        raise _err(
-            "LIMIT_EXCEEDED",
-            f"rrule is {len(rule)} characters; the maximum is {MAX_RULE_LEN}",
-        )
     if not _BARE_RECUR.match(rule):
         # A RECUR value is only KEY=VALUE pairs joined by ';'. Anything else --
         # most importantly ':' or a line break -- means the caller passed a whole
@@ -420,11 +423,10 @@ def _check_part(key: str, value: str, freq: str = "") -> None:
         n = _int_part(key, value)
         if n < 1:
             raise _err("INVALID_RULE", f"COUNT must be 1 or greater, got {n}")
-        if n > MAX_LIMIT:
-            raise _err(
-                "LIMIT_EXCEEDED",
-                f"COUNT is {n}; the maximum this package expands is {MAX_LIMIT}",
-            )
+        # No upper bound here: `walk`'s MAX_STEPS budget already caps real
+        # work independently of what COUNT claims, and rrulestr/rruleset are
+        # built with cache=False (lazy), so a large COUNT never pre-allocates
+        # anything.
         return
 
     if key == "UNTIL":
@@ -896,17 +898,6 @@ def build(recurrence) -> Expansion:
 
     parts = check_rule(recurrence.rrule)
 
-    if len(recurrence.rdate) > MAX_DATE_LIST:
-        raise _err(
-            "LIMIT_EXCEEDED",
-            f"rdate has {len(recurrence.rdate)} entries; the maximum is {MAX_DATE_LIST}",
-        )
-    if len(recurrence.exdate) > MAX_DATE_LIST:
-        raise _err(
-            "LIMIT_EXCEEDED",
-            f"exdate has {len(recurrence.exdate)} entries; the maximum is {MAX_DATE_LIST}",
-        )
-
     dt, kind = parse_instant(recurrence.dtstart, "dtstart")
     zone = zone_for(kind, recurrence.tzid)
     dtstart = localize(dt, zone)
@@ -1220,15 +1211,13 @@ def _reap(proc, channel) -> None:
 
 
 def effective_limit(limit: int, default: int = DEFAULT_LIMIT) -> int:
+    # No upper bound: `walk`'s MAX_STEPS budget already caps real work
+    # independently of what a caller requests, so a large `limit` just means
+    # `take` keeps collecting until that genuine ceiling, never further.
     if limit < 0:
         raise _err("INVALID_ARGUMENT", f"limit must not be negative, got {limit}")
     if limit == 0:
         return default
-    if limit > MAX_LIMIT:
-        raise _err(
-            "INVALID_ARGUMENT",
-            f"limit must be at most {MAX_LIMIT}, got {limit}",
-        )
     return limit
 
 

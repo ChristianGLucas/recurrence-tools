@@ -101,9 +101,12 @@ def test_invalid_dtstart_returns_structured_error():
     assert r.error.code == "INVALID_DATETIME"
 
 
-def test_limit_above_maximum_is_rejected():
+def test_large_limit_is_accepted_not_capped():
+    # No package-level upper bound on `limit`: walk's own scan-step budget
+    # caps real work regardless of what's requested.
     r = run("FREQ=DAILY;COUNT=1", "20260101T000000", limit=10001)
-    assert r.error.code == "INVALID_ARGUMENT"
+    assert r.error.code == ""
+    assert r.count == 1
 
 
 def test_unknown_tzid_is_rejected():

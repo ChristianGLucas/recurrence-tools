@@ -14,7 +14,6 @@ from dateutil.rrule import rrulestr
 from datetime import datetime
 
 from nodes._recur import (
-    MAX_RULE_LEN,
     RecurError,
     canonical_rule,
     check_rule,
@@ -138,7 +137,6 @@ def test_rejects_anything_that_is_not_a_bare_recur_value(rule):
         ("FREQ=DAILY;COUNT=abc", "INVALID_RULE"),
         ("FREQ=DAILY;COUNT=0", "INVALID_RULE"),
         ("FREQ=DAILY;BYSETPOS=1", "INVALID_RULE"),   # BYSETPOS needs a partner
-        ("FREQ=DAILY;COUNT=999999", "LIMIT_EXCEEDED"),
         ("FREQ=WEEKLY;BYDAY=XX", "INVALID_RULE"),
         ("FREQ=DAILY;UNTIL=notadate", "INVALID_DATETIME"),
     ],
@@ -147,11 +145,19 @@ def test_structural_rejections(rule, code):
     assert reject(rule) == code
 
 
-def test_rejects_oversized_rule_before_parsing():
-    # The length guard fires on the raw string, so a pathological input never
-    # reaches the parser at all.
-    assert reject("FREQ=DAILY;" + "BYMONTH=1;" * 5000) == "LIMIT_EXCEEDED"
-    assert len("FREQ=DAILY;" + "BYMONTH=1;" * 5000) > MAX_RULE_LEN
+def test_large_count_is_accepted_not_capped():
+    # No package-level upper bound on COUNT: walk's own MAX_STEPS budget
+    # caps real work regardless of what COUNT claims (see _recur.py).
+    assert reject("FREQ=DAILY;COUNT=999999") is None
+
+
+def test_large_rule_text_no_crash():
+    # No package-level rule-text length cap; a long-but-well-formed rule
+    # (a BYMONTH list with many repeated entries, well over the old 2048-char
+    # bound) must still validate cleanly.
+    rule = "FREQ=YEARLY;BYMONTH=" + ",".join(["1"] * 2000) + ";COUNT=1"
+    assert len(rule) > 2048
+    assert reject(rule) is None
 
 
 def test_case_is_normalized_not_rejected():
@@ -202,8 +208,9 @@ def test_effective_limit_bounds():
     assert effective_limit(0) == 100
     assert effective_limit(0, default=10000) == 10000
     assert effective_limit(50) == 50
-    with pytest.raises(RecurError):
-        effective_limit(10001)
+    # No package-level upper bound: walk's own MAX_STEPS budget caps real
+    # work regardless of what limit the caller requests.
+    assert effective_limit(10_000_001) == 10_000_001
     with pytest.raises(RecurError):
         effective_limit(-1)
 

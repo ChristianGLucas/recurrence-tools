@@ -2,12 +2,15 @@ from gen.messages_pb2 import CountRequest, OccurrenceCount
 from gen.axiom_context import AxiomContext
 
 from nodes import _recur
-from nodes._recur import MAX_LIMIT, RecurError, build, effective_limit, walk
+from nodes._recur import MAX_STEPS, RecurError, build, effective_limit, walk
 
 
 def _compute(ax: AxiomContext, input: CountRequest) -> OccurrenceCount:
     try:
-        limit = effective_limit(input.limit, default=MAX_LIMIT)
+        # Count's default, when the caller doesn't specify `limit`, is the
+        # walk's own genuine safety ceiling (MAX_STEPS) — "count as many as
+        # can safely be counted" rather than Expand's smaller listing default.
+        limit = effective_limit(input.limit, default=MAX_STEPS)
         exp = build(input.recurrence)
         total = 0
         truncated = False
@@ -51,9 +54,13 @@ class _SilentContext:
 def count(ax: AxiomContext, input: CountRequest) -> OccurrenceCount:
     """Count the occurrences a recurrence produces, up to a limit.
 
-    Counting stops at `limit` (default and maximum 10000). `truncated` is true
-    when the recurrence produces more than that, in which case `count` is a
-    floor rather than the exact total — an unbounded rule can have no total.
+    Counting stops at `limit` (default: the walk's own scan-step ceiling, so
+    "no limit given" means "count as many as can safely be counted"). No
+    package-level upper bound on a caller-supplied `limit` — the walk's own
+    MAX_STEPS/MAX_SCAN_STEPS budgets already cap real work regardless.
+    `truncated` is true when the recurrence produces more than the resolved
+    limit, in which case `count` is a floor rather than the exact total — an
+    unbounded rule can have no total.
     """
     data, failure = _recur.isolate("nodes.count", input)
     output = OccurrenceCount()

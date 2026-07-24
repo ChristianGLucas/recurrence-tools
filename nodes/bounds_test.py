@@ -431,7 +431,8 @@ def test_sparse_rules_at_every_limit_return_data_not_an_error(rule, limit):
 
 @pytest.mark.parametrize("rule", SPARSE_RULES)
 def test_count_at_its_documented_default_serves_every_valid_rule(rule):
-    """Count's own default limit is 10000; the default request must work."""
+    """Count's own default limit is the walk's scan-step budget; the default
+    request must work."""
     result, elapsed = timed(
         lambda: count(
             FakeContext(),
@@ -514,14 +515,17 @@ def test_caller_strings_echoed_into_errors_are_bounded():
     assert "200000 characters" in result.error.message
 
 
-def test_oversized_fields_are_refused_before_being_built():
-    """Counted on DISTINCT values: a repeated entry collapses in the canonical
-    form, so only a genuinely large set of distinct values is too big to fit."""
-    result = build(FakeContext(), RuleParts(freq="YEARLY", byyearday=list(range(1, 2000))))
-    assert result.error.code == "LIMIT_EXCEEDED"
-    assert "entries" in result.error.message
+def test_large_distinct_field_is_served_not_capped():
+    """No package-level rule-text length cap: a field with hundreds of
+    DISTINCT, individually valid entries (every positive and negative
+    BYYEARDAY value RFC 5545 allows) serializes to well over the old 2048-char
+    guard and must still be served -- payload size is the platform's job."""
+    yeardays = list(range(1, 367)) + list(range(-366, 0))
+    result = build(FakeContext(), RuleParts(freq="YEARLY", byyearday=yeardays))
+    assert result.error.code == "", result.error.message
+    assert len(result.rrule) > 2048, len(result.rrule)
 
-    # The same COUNT of entries, all identical, collapses and is served.
+    # The same COUNT of entries, all identical, collapses in the canonical form.
     collapsed = build(FakeContext(), RuleParts(freq="YEARLY", byyearday=[100] * 2000))
     assert collapsed.error.code == "", collapsed.error.message
     assert collapsed.rrule == "FREQ=YEARLY;BYYEARDAY=100"
@@ -924,10 +928,11 @@ def test_an_ambiguous_local_anchor_resolves_to_the_first_instant():
     assert list(later.occurrences) == [], "06:30Z is the second instant, not chosen"
 
 
-def test_the_rdate_and_exdate_caps_are_enforced_at_their_documented_size():
-    """No test previously supplied more than one rdate, so cutting the cap from
-    1000 to 10 -- or deleting the guard -- changed nothing the suite noticed."""
-    at_cap = expand(
+def test_a_large_rdate_list_is_served_not_capped():
+    """No package-level rdate/exdate count cap -- payload size is the
+    platform's job. A list well over the old 1000-entry guard must still be
+    accepted and merged in full."""
+    at_old_cap = expand(
         FakeContext(),
         ExpandRequest(
             recurrence=recurrence(
@@ -940,21 +945,24 @@ def test_the_rdate_and_exdate_caps_are_enforced_at_their_documented_size():
             limit=10000,
         ),
     )
-    assert at_cap.error.code == "", at_cap.error.message
-    assert at_cap.count == 1001
+    assert at_old_cap.error.code == "", at_old_cap.error.message
+    assert at_old_cap.count == 1001
 
-    over_cap = expand(
+    over_old_cap = expand(
         FakeContext(),
         ExpandRequest(
             recurrence=recurrence(
                 "FREQ=DAILY;COUNT=1", "20260101T000000",
-                rdate=["20270101T000000"] * 1001,
+                rdate=[
+                    (datetime(2027, 1, 1) + timedelta(days=n)).strftime("%Y%m%dT000000")
+                    for n in range(2000)
+                ],
             ),
-            limit=10,
+            limit=10000,
         ),
     )
-    assert over_cap.error.code == "LIMIT_EXCEEDED"
-    assert "1001" in over_cap.error.message
+    assert over_old_cap.error.code == "", over_old_cap.error.message
+    assert over_old_cap.count == 2001
 
 
 def test_a_trailing_newline_cannot_slip_through_the_rule_guard():
@@ -1243,21 +1251,17 @@ def test_deciding_the_ceiling_does_not_double_the_work():
     assert elapsed < 6.0, f"neither answered nor refused promptly: {elapsed:.2f}s"
 
 
-def test_the_entry_count_guard_measures_distinct_values():
-    """A repeated entry collapses in the canonical form, so counting the raw
-    list refused input whose rule is twenty characters long."""
+def test_repeated_entries_collapse_in_the_canonical_form():
+    """A repeated entry collapses to one in the canonical form, regardless of
+    how many times it was repeated -- no package-level count cap needed to
+    serve this; see test_large_distinct_field_is_served_not_capped for the
+    genuinely-distinct-and-large case."""
     for repeats in (1024, 1025, 3000):
         result = build(
             FakeContext(), RuleParts(freq="WEEKLY", byday=["MO"] * repeats)
         )
         assert result.error.code == "", f"{repeats}: {result.error.message}"
         assert result.rrule == "FREQ=WEEKLY;BYDAY=MO"
-
-    # A genuinely oversized list of DISTINCT values is still refused.
-    too_many = build(
-        FakeContext(), RuleParts(freq="YEARLY", byyearday=list(range(1, 2000)))
-    )
-    assert too_many.error.code == "LIMIT_EXCEEDED"
 
 
 def test_the_same_byday_ordinal_spelled_two_ways_is_one_entry():

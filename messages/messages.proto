@@ -38,7 +38,8 @@ message Recurrence {
   // "RRULE:" prefix and no other content, e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10".
   // A RECUR value never contains ':' or a line break, so any input that does is
   // rejected: that is how a smuggled "DTSTART:"/"EXDATE:" line is prevented from
-  // silently overriding this envelope's own anchor. Max 2048 characters.
+  // silently overriding this envelope's own anchor. No package-level length
+  // cap (the platform bounds payload size).
   string rrule = 1;
   // RFC 5545 DTSTART, the anchor the rule expands from. Required. Its form
   // (DATE, floating DATE-TIME, or UTC DATE-TIME) determines the form of every
@@ -63,10 +64,12 @@ message Recurrence {
   // day resolves to the FIRST of the two.
   string tzid = 3;
   // RFC 5545 RDATE values: extra occurrences merged into the recurrence set.
-  // Each must use a form compatible with `dtstart`. Max 1000 entries.
+  // Each must use a form compatible with `dtstart`. No package-level count
+  // cap (the platform bounds payload size).
   repeated string rdate = 4;
   // RFC 5545 EXDATE values: occurrences removed from the recurrence set. An
-  // EXDATE that matches no occurrence is ignored, per RFC 5545. Max 1000 entries.
+  // EXDATE that matches no occurrence is ignored, per RFC 5545. No
+  // package-level count cap.
   repeated string exdate = 5;
   // An error carried in from an upstream node. When set, every node consuming
   // this envelope propagates it verbatim and does no work, so a flow reports
@@ -80,9 +83,10 @@ message Recurrence {
 message ExpandRequest {
   // The recurrence to expand.
   Recurrence recurrence = 1;
-  // How many occurrences to return. 0 means the default of 100; the maximum
-  // accepted is 10000. It is a ceiling, not a promise: a sparse rule can hit
-  // the scan budget first and return fewer, flagged `truncated`.
+  // How many occurrences to return. 0 means the default of 100. No
+  // package-level upper bound — the walk's own scan-step budget already
+  // caps real work regardless of what's requested, and a sparse rule can
+  // hit that budget first and return fewer, flagged `truncated`.
   int32 limit = 2;
 }
 
@@ -95,8 +99,8 @@ message BetweenRequest {
   // Window end, EXCLUSIVE. An RFC 5545 instant compatible with `dtstart`.
   // Must be strictly after `start`.
   string end = 3;
-  // Cap on returned occurrences. 0 means the default of 100; maximum accepted
-  // is 10000. A ceiling, not a promise -- see ExpandRequest.limit.
+  // Cap on returned occurrences. 0 means the default of 100. No
+  // package-level upper bound -- see ExpandRequest.limit.
   int32 limit = 4;
 }
 
@@ -121,13 +125,16 @@ message ContainsRequest {
 message CountRequest {
   // The recurrence to count.
   Recurrence recurrence = 1;
-  // Stop counting at this many occurrences. 0 means the maximum of 10000.
+  // Stop counting at this many occurrences. 0 means "count as many as can
+  // safely be counted" (the walk's own scan-step budget). No package-level
+  // upper bound on an explicit value -- see ExpandRequest.limit.
   int32 limit = 2;
 }
 
 // A bare RFC 5545 RECUR value, for rule-level nodes that need no anchor.
 message RuleInput {
-  // The RRULE property value, with no "RRULE:" prefix. Max 2048 characters.
+  // The RRULE property value, with no "RRULE:" prefix. No package-level
+  // length cap (the platform bounds payload size).
   string rrule = 1;
   // An error carried in from an upstream node; propagated verbatim when set.
   // See Recurrence.error.

@@ -3,7 +3,6 @@ from gen.axiom_context import AxiomContext
 
 from nodes._recur import (
     INT_LIST_PARTS,
-    MAX_RULE_LEN,
     RecurError,
     canonical_rule,
     check_rule,
@@ -48,24 +47,6 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
                 error={"code": input.error.code, "message": input.error.message}
             )
 
-        # Each entry costs at least one character plus a separator, so a field
-        # with more entries than the rule length allows can be refused before
-        # anything is built. Joining first would materialize a 200KB string only
-        # to reject it for exceeding 2048.
-        for name in ("byday",) + tuple(p.lower() for p in INT_LIST_PARTS):
-            # Count DISTINCT values: a repeated entry collapses in the canonical
-            # form, so measuring the raw list refused input whose rule is short.
-            # String-keyed, so it can only ever over-count relative to the
-            # canonical form ('1MO' and '01MO' count as two) -- never under, so
-            # no oversized distinct list slips through.
-            values = list(dict.fromkeys(str(v).upper() for v in getattr(input, name)))
-            if len(values) * 2 > MAX_RULE_LEN:
-                raise RecurError(
-                    "LIMIT_EXCEEDED",
-                    f"{name.upper()} has {len(values)} entries, which cannot fit "
-                    f"in a rule of at most {MAX_RULE_LEN} characters",
-                )
-
         parts = []
         if input.freq:
             parts.append(("FREQ", input.freq))
@@ -99,10 +80,9 @@ def build(ax: AxiomContext, input: RuleParts) -> RuleOutput:
         # rather than a gate. The sorter was also made non-raising, so reverting
         # this order alone does NOT break any test. Do not assume a test will
         # catch you if you swap these lines back.
-        # De-duplicate list values before the length check. Measuring the raw
-        # join meant byday=['MO']*700 was refused for exceeding 2048 characters
-        # even though its canonical form is 'BYDAY=MO' -- input that worked
-        # before and is explicitly allowed through by the per-field guard above.
+        # De-duplicate list values so the assembled text matches what
+        # canonical_rule would produce anyway (e.g. byday=['MO']*700 collapses
+        # to 'BYDAY=MO') -- no repeated-entry noise reaches check_rule/probe_rule.
         raw = ";".join(f"{key}={_dedupe(value)}" for key, value in parts)
         validated = check_rule(raw)
         probe_rule(raw)
