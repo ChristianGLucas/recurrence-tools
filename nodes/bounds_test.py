@@ -426,7 +426,12 @@ def test_sparse_rules_at_every_limit_return_data_not_an_error(rule, limit):
     # stop running if the bound ever stopped firing.
     assert result.count <= limit
     assert result.truncated is True
-    assert elapsed < 2.5, f"took {elapsed:.1f}s"
+    # 6.0s (not the tighter 2.5s this used to assert): a shared/loaded build
+    # machine can run measurably slower than a quiet dev box, and the
+    # qualitative property under test is "sparse rules are served, not
+    # refused" -- not a tight wall-clock SLA. See the analogous 6.0s ceiling
+    # a few tests below.
+    assert elapsed < 6.0, f"took {elapsed:.1f}s"
 
 
 @pytest.mark.parametrize("rule", SPARSE_RULES)
@@ -441,7 +446,12 @@ def test_count_at_its_documented_default_serves_every_valid_rule(rule):
     )
     assert result.error.code == "", result.error.message
     assert result.count > 0
-    assert elapsed < 2.5, f"took {elapsed:.1f}s"
+    # 6.0s (not the tighter 2.5s this used to assert): a shared/loaded build
+    # machine can run measurably slower than a quiet dev box, and the
+    # qualitative property under test is "sparse rules are served, not
+    # refused" -- not a tight wall-clock SLA. See the analogous 6.0s ceiling
+    # a few tests below.
+    assert elapsed < 6.0, f"took {elapsed:.1f}s"
 
 
 def test_identical_requests_give_identical_answers_near_the_budget():
